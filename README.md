@@ -460,6 +460,45 @@ voice: "af_bella"
 **Male US:** am_adam, am_echo, am_eric, am_fenrir, am_liam, am_michael, am_onyx, am_puck
 **Male UK:** bm_daniel, bm_fable, bm_george, bm_lewis
 
+### Startup line: local Announcer voice
+
+The first line spoken at startup is `announcement` in `glados_config.yaml` (default: "All neural network modules are now loaded. System Operational."). `glados start` and the TUI both play it through `Glados.play_announcement` before conversation begins. That line, and later calls to `Glados.speak_notice(text)`, use an optional second Piper model. Every other line — LLM replies and the `speak` tool — stays on `voice` (the bundled GLaDOS Piper model when `voice: "glados"`).
+
+This repo does not include the Announcer weights. Keep your own fine-tune on disk and point at the `.onnx` file. Do not commit the ONNX, the `.onnx.json` sidecar, wavs, or checkpoints.
+
+Place the pair next to each other:
+
+```text
+announcer.onnx
+announcer.onnx.json
+```
+
+`announcer.json` is also accepted. Then set the ONNX path, or leave it unset to keep the startup line on the GLaDOS voice.
+
+Windows (`configs/glados_config.yaml`, forward slashes):
+
+```yaml
+announcer_model_path: "D:/local/voices/announcer.onnx"
+```
+
+WSL, when the files live on the Windows drive:
+
+```yaml
+announcer_model_path: "/mnt/d/local/voices/announcer.onnx"
+```
+
+Environment variable (overrides the YAML value; set it to empty to disable a path from the file):
+
+```bash
+# Windows PowerShell
+$env:GLADOS_ANNOUNCER_MODEL = "D:\local\voices\announcer.onnx"
+
+# WSL / Linux
+export GLADOS_ANNOUNCER_MODEL=/mnt/d/local/voices/announcer.onnx
+```
+
+If the path, the sidecar, or the ONNX session is missing, startup still speaks. That line uses the conversation voice and the process does not crash.
+
 ### Custom Personality
 
 Copy `configs/glados_config.yaml`, edit the personality:

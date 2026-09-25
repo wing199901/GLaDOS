@@ -12,6 +12,13 @@ Glados:
   llm_headers: null  # Optional extra headers (e.g., OpenRouter HTTP-Referer, X-Title)
   wake_word: null
   voice: "glados"
+  # Optional second Piper voice for the startup announcement (and Glados.speak_notice).
+  # Point this at YOUR local announcer.onnx. The sidecar is announcer.onnx.json
+  # (or announcer.json). Do not commit the ONNX, JSON, wavs, or checkpoints.
+  # Windows: "D:/local/voices/announcer.onnx"
+  # WSL:     "/mnt/d/local/voices/announcer.onnx"
+  # Override without editing this file: GLADOS_ANNOUNCER_MODEL
+  # announcer_model_path: null
   announcement: "All neural network modules are now loaded. System Operational."
   autonomy:
     enabled: false

@@ -18,11 +18,14 @@ class AudioMessage:
         audio: Generated audio samples as float32 array
         text: Associated text that was synthesized
         is_eos: Flag indicating end of speech stream
+        sample_rate: Sample rate of this clip. Playback uses this when set,
+            so a notice voice can differ from the conversation voice.
     """
 
     audio: NDArray[np.float32]
     text: str
     is_eos: bool = False
+    sample_rate: int | None = None
 
 
 @dataclass

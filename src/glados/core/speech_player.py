@@ -95,6 +95,8 @@ class SpeechPlayer:
                     self.currently_speaking_event.clear()
                     continue
 
+                playback_rate = audio_msg.sample_rate or self.tts_sample_rate
+
                 if audio_len and audio_msg.text:  # Ensure there's audio and text
                     self.currently_speaking_event.set()  # We are about to speak
                     if self._interaction_state:
@@ -107,12 +109,12 @@ class SpeechPlayer:
                             meta={"audio_samples": audio_len},
                         )
 
-                    self.audio_io.start_speaking(audio_msg.audio, self.tts_sample_rate)
+                    self.audio_io.start_speaking(audio_msg.audio, playback_rate)
                     logger.success(f"TTS text: {audio_msg.text}")
 
                     # Wait for the audio to finish playing or be interrupted
                     interrupted, percentage_played = self.audio_io.measure_percentage_spoken(
-                        audio_len, self.tts_sample_rate
+                        audio_len, playback_rate
                     )
 
                     if interrupted:

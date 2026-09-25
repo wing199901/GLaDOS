@@ -165,6 +165,10 @@ cython_debug/
 *.gguf
 *.onnx
 *.nemo
+# Piper sidecars for local voices (model.onnx.json). Do not commit third-party
+# weights or the metadata shipped beside them. The bundled GLaDOS config is
+# models/TTS/glados.json and is not matched by this pattern.
+*.onnx.json
 
 # Local knowledge store
 data/knowledge.json

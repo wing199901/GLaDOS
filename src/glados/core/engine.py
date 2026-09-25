@@ -21,6 +21,7 @@ import yaml
 from ..ASR import TranscriberProtocol, get_audio_transcriber
 from ..audio_io import AudioProtocol, get_audio_system
 from ..TTS import SpeechSynthesizerProtocol, get_speech_synthesizer
+from ..TTS.announcer import try_load_announcer_voice
 from ..utils import spoken_text_converter as stc
 from ..utils.resources import resource_path
 from ..autonomy import AutonomyConfig, AutonomyLoop, ConstitutionalState, EventBus, InteractionState, SubagentConfig, SubagentManager, TaskManager, TaskSlotStore
@@ -44,6 +45,7 @@ from .store import Store, format_preferences
 from .llm_tracking import InFlightCounter
 from .speech_listener import SpeechListener
 from .speech_player import SpeechPlayer
+from .spoken_line import SpokenLine, TtsQueueItem
 from .text_listener import TextListener
 from .tool_executor import ToolExecutor
 from .tts_synthesizer import TextToSpeechSynthesizer
@@ -115,6 +117,9 @@ class GladosConfig(BaseModel):
     asr_engine: str
     wake_word: str | None
     voice: str
+    # Optional local Piper ONNX (plus its .json sidecar) for the startup announcement
+    # and later notice lines. Unset, or a missing file, keeps those lines on `voice`.
+    announcer_model_path: str | None = None
     announcement: str | None
     llm_headers: dict[str, str] | None = None
     tui_theme: str | None = None
@@ -132,6 +137,19 @@ class GladosConfig(BaseModel):
             env_key = os.environ.get("MINIMAX_API_KEY")
             if env_key:
                 self.api_key = env_key
+        return self
+
+    @model_validator(mode="after")
+    def _apply_announcer_model_env(self) -> "GladosConfig":
+        """Let GLADOS_ANNOUNCER_MODEL override the YAML path.
+
+        An empty value disables the Announcer voice even when the YAML sets a path.
+        The variable is ignored when it is unset, so a config file path still applies.
+        """
+        env_path = os.environ.get("GLADOS_ANNOUNCER_MODEL")
+        if env_path is not None:
+            stripped = env_path.strip()
+            self.announcer_model_path = stripped or None
         return self
 
     @classmethod
@@ -243,6 +261,7 @@ class Glados:
         tts_enabled: bool = True,
         asr_muted: bool = False,
         llm_headers: dict[str, str] | None = None,
+        notice_tts_model: SpeechSynthesizerProtocol | None = None,
     ) -> None:
         """
         Initialize the Glados voice assistant with configuration parameters.
@@ -256,6 +275,8 @@ class Glados:
             asr_model (TranscriberProtocol): The ASR model for transcribing audio input.
             tts_model (SpeechSynthesizerProtocol): The TTS model for synthesizing spoken output.
             audio_io (AudioProtocol): The audio input/output system to use.
+            notice_tts_model: Optional second Piper model for the startup announcement and
+                other short notice lines. Missing means those lines use ``tts_model``.
             completion_url (HttpUrl): The URL for the LLM completion endpoint.
             llm_model (str): The name of the LLM model to use.
             api_key (str | None): API key for accessing the LLM service, if required.
@@ -274,6 +295,7 @@ class Glados:
         """
         self._asr_model = asr_model
         self._tts = tts_model
+        self._notice_tts = notice_tts_model
         self.input_mode = input_mode
         self.completion_url = completion_url
         self.llm_model = llm_model
@@ -382,7 +404,7 @@ class Glados:
         autonomy_queue_size = autonomy_queue_max if autonomy_queue_max and autonomy_queue_max > 0 else 0
         self.llm_queue_autonomy: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=autonomy_queue_size)
         self.tool_calls_queue: queue.Queue[dict[str, Any]] = queue.Queue()  # Tool calls from LLMProcessor to ToolExecutor
-        self.tts_queue: queue.Queue[str] = queue.Queue()  # Text from LLMProcessor to TTSynthesizer
+        self.tts_queue: queue.Queue[TtsQueueItem] = queue.Queue()  # Text from LLMProcessor to TTSynthesizer
         self.audio_queue: queue.Queue[AudioMessage] = queue.Queue()  # AudioMessages from TTSSynthesizer to AudioPlayer
 
         self.mcp_manager: MCPManager | None = None
@@ -516,6 +538,7 @@ class Glados:
             pause_time=self.PAUSE_TIME,
             tts_muted_event=self.tts_muted_event,
             observability_bus=self.observability_bus,
+            notice_model=self._notice_tts,
         )
 
         self.speech_player = SpeechPlayer(
@@ -804,7 +827,9 @@ class Glados:
         """
         Play the announcement using text-to-speech (TTS) synthesis.
 
-        This method checks if an announcement is set and, if so, places it in the TTS queue for processing.
+        This method checks if an announcement is set and, if so, places it in the TTS queue as a notice line.
+        That startup line uses the Announcer Piper model when ``announcer_model_path`` loaded; otherwise it uses
+        the conversation voice. Later conversation lines are not notice lines.
         If the `interruptible` parameter is set to `True`, it allows the announcement to be interrupted by other
         audio playback. If `interruptible` is `None`, it defaults to the instance's `interruptible` setting.
 
@@ -817,8 +842,21 @@ class Glados:
             interruptible = self.interruptible
         logger.success("Playing announcement...")
         if self.announcement:
-            self.tts_queue.put(self.announcement)
+            self.tts_queue.put(SpokenLine(self.announcement, notice=True))
             self.processing_active_event.set()
+
+    def speak_notice(self, text: str) -> None:
+        """Queue a short system line on the Announcer voice when that model is configured.
+
+        Conversation lines stay on the default voice. A missing Announcer model
+        speaks this line with the conversation voice instead of raising.
+        """
+        spoken = text.strip()
+        if not spoken:
+            return
+        logger.info("Queueing notice line.")
+        self.tts_queue.put(SpokenLine(spoken, notice=True))
+        self.processing_active_event.set()
 
     @property
     def messages(self) -> list[dict[str, Any]]:
@@ -846,8 +884,7 @@ class Glados:
             engine_type=config.asr_engine,
         )
 
-        tts_model: SpeechSynthesizerProtocol
-        tts_model = get_speech_synthesizer(config.voice)
+        tts_model, notice_tts_model = cls._build_tts_models(config)
 
         audio_io = get_audio_system(
             backend_type=config.audio_io,
@@ -858,6 +895,7 @@ class Glados:
             return cls(
                 asr_model=asr_model,
                 tts_model=tts_model,
+                notice_tts_model=notice_tts_model,
                 audio_io=audio_io,
                 completion_url=config.completion_url,
                 llm_model=config.llm_model,
@@ -879,6 +917,20 @@ class Glados:
         except Exception:
             cls._close_audio_backend(audio_io)
             raise
+
+    @staticmethod
+    def _build_tts_models(
+        config: GladosConfig,
+    ) -> tuple[SpeechSynthesizerProtocol, SpeechSynthesizerProtocol | None]:
+        """Load the conversation voice and, when configured, the Announcer notice voice.
+
+        The conversation voice is always the configured ``voice`` (GLaDOS Piper by
+        default). The Announcer model is optional and local; load failures return
+        None so startup speech falls back to the conversation voice.
+        """
+        conversation = get_speech_synthesizer(config.voice)
+        notice = try_load_announcer_voice(config.announcer_model_path)
+        return conversation, notice
 
     @staticmethod
     def _close_audio_backend(audio_io: AudioProtocol) -> None:

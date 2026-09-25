@@ -3,6 +3,8 @@ from typing import Any
 
 from loguru import logger
 
+from ..core.spoken_line import TtsQueueItem
+
 tool_definition = {
     "type": "function",
     "function": {
@@ -30,7 +32,7 @@ class Speak:
     ) -> None:
         self.llm_queue = llm_queue
         tool_config = tool_config or {}
-        self._tts_queue: queue.Queue[str] | None = tool_config.get("tts_queue")
+        self._tts_queue: queue.Queue[TtsQueueItem] | None = tool_config.get("tts_queue")
 
     def run(self, tool_call_id: str, call_args: dict[str, Any]) -> None:
         if self._tts_queue is None:
