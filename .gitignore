@@ -169,6 +169,10 @@ cython_debug/
 # weights or the metadata shipped beside them. The bundled GLaDOS config is
 # models/TTS/glados.json and is not matched by this pattern.
 *.onnx.json
+# Local Announcer drop-in. Copy these into models/TTS/ yourself; never commit them.
+models/TTS/announcer.onnx
+models/TTS/announcer.onnx.json
+models/TTS/announcer.json
 
 # Local knowledge store
 data/knowledge.json

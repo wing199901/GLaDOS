@@ -20,9 +20,10 @@ from glados.core.engine import Glados, GladosConfig
 from glados.core.speech_player import SpeechPlayer
 from glados.core.spoken_line import SpokenLine
 from glados.core.tts_synthesizer import TextToSpeechSynthesizer
-from glados.TTS.announcer import try_load_announcer_voice
+from glados.TTS.announcer import DEFAULT_ANNOUNCER_MODEL, resolve_announcer_model_path, try_load_announcer_voice
 from glados.TTS.piper_config import piper_config_candidates, resolve_piper_config_path
 from glados.TTS.tts_glados import SpeechSynthesizer
+from glados.utils.resources import resource_path
 
 
 class _FakeVoice:
@@ -88,6 +89,7 @@ def _piper_json(sample_rate: int, bos_id: int) -> dict[str, Any]:
 
 
 def _write_piper_pair(directory: Path, sample_rate: int = 22050, bos_id: int = 9) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
     model = directory / "announcer.onnx"
     model.write_bytes(b"not-a-real-onnx")
     config = directory / "announcer.onnx.json"
@@ -213,26 +215,53 @@ def test_announcer_load_failure_falls_back(tmp_path: Path, monkeypatch: pytest.M
 
 def test_config_reads_announcer_path_and_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_file = tmp_path / "glados_config.yaml"
-    config_file.write_text(_minimal_glados_yaml("D:/local/voices/announcer.onnx"), encoding="utf-8")
+    config_file.write_text(_minimal_glados_yaml(DEFAULT_ANNOUNCER_MODEL), encoding="utf-8")
+    monkeypatch.delenv("GLADOS_ANNOUNCER_MODEL", raising=False)
 
     loaded = GladosConfig.from_yaml(config_file)
     assert loaded.voice == "glados"
-    assert loaded.announcer_model_path == "D:/local/voices/announcer.onnx"
+    assert loaded.announcer_model_path == "models/TTS/announcer.onnx"
 
-    monkeypatch.setenv("GLADOS_ANNOUNCER_MODEL", "/mnt/d/local/voices/announcer.onnx")
+    monkeypatch.setenv("GLADOS_ANNOUNCER_MODEL", "models/TTS/custom-announcer.onnx")
     overridden = GladosConfig.from_yaml(config_file)
-    assert overridden.announcer_model_path == "/mnt/d/local/voices/announcer.onnx"
+    assert overridden.announcer_model_path == "models/TTS/custom-announcer.onnx"
 
     monkeypatch.setenv("GLADOS_ANNOUNCER_MODEL", "  ")
     disabled = GladosConfig.from_yaml(config_file)
     assert disabled.announcer_model_path is None
 
 
+def test_shipped_config_uses_in_repo_announcer_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GLADOS_ANNOUNCER_MODEL", raising=False)
+    loaded = GladosConfig.from_yaml(resource_path("configs/glados_config.yaml"))
+
+    assert loaded.announcer_model_path == DEFAULT_ANNOUNCER_MODEL
+    assert loaded.announcer_model_path is not None
+    assert not Path(loaded.announcer_model_path).is_absolute()
+
+
+def test_relative_announcer_path_resolves_from_package_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    model = _write_piper_pair(tmp_path / "models" / "TTS")
+    monkeypatch.setattr("glados.TTS.announcer.resource_path", lambda relative: tmp_path / relative)
+    captured: dict[str, Path] = {}
+
+    def _capture(model_path: Path, *_args: object, **_kwargs: object) -> str:
+        captured["model_path"] = model_path
+        return "loaded"
+
+    monkeypatch.setattr("glados.TTS.announcer.SpeechSynthesizer", _capture)
+
+    assert try_load_announcer_voice("models/TTS/announcer.onnx") == "loaded"
+    assert captured["model_path"] == model
+    assert resolve_announcer_model_path("models/TTS/announcer.onnx") == model
+
+
 def test_build_tts_models_keeps_conversation_voice_and_loads_notice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config_file = tmp_path / "glados_config.yaml"
-    config_file.write_text(_minimal_glados_yaml("D:/local/voices/announcer.onnx"), encoding="utf-8")
+    config_file.write_text(_minimal_glados_yaml(DEFAULT_ANNOUNCER_MODEL), encoding="utf-8")
+    monkeypatch.delenv("GLADOS_ANNOUNCER_MODEL", raising=False)
     config = GladosConfig.from_yaml(config_file)
     monkeypatch.setattr("glados.core.engine.get_speech_synthesizer", lambda voice: f"conversation:{voice}")
     monkeypatch.setattr("glados.core.engine.try_load_announcer_voice", lambda path: f"notice:{path}")
@@ -240,7 +269,7 @@ def test_build_tts_models_keeps_conversation_voice_and_loads_notice(
     conversation, notice = Glados._build_tts_models(config)
 
     assert conversation == "conversation:glados"
-    assert notice == "notice:D:/local/voices/announcer.onnx"
+    assert notice == "notice:models/TTS/announcer.onnx"
 
 
 def test_play_announcement_is_a_notice_line() -> None:
@@ -273,14 +302,15 @@ def test_speak_notice_queues_announcer_line_and_ignores_blank() -> None:
     assert host.tts_queue.get_nowait() == SpokenLine("Chamber lockdown.", notice=True)
 
 
-def test_config_defaults_announcer_path_to_unset(tmp_path: Path) -> None:
+def test_config_defaults_announcer_path_to_repo_drop_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     text = _minimal_glados_yaml(None).replace("  announcer_model_path: null\n", "")
     config_file = tmp_path / "glados_config.yaml"
     config_file.write_text(text, encoding="utf-8")
+    monkeypatch.delenv("GLADOS_ANNOUNCER_MODEL", raising=False)
 
     loaded = GladosConfig.from_yaml(config_file)
 
-    assert loaded.announcer_model_path is None
+    assert loaded.announcer_model_path == DEFAULT_ANNOUNCER_MODEL
 
 
 def _collect(audio_queue: queue.Queue[AudioMessage], count: int) -> list[AudioMessage]:

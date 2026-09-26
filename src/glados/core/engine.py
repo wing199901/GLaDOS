@@ -21,7 +21,7 @@ import yaml
 from ..ASR import TranscriberProtocol, get_audio_transcriber
 from ..audio_io import AudioProtocol, get_audio_system
 from ..TTS import SpeechSynthesizerProtocol, get_speech_synthesizer
-from ..TTS.announcer import try_load_announcer_voice
+from ..TTS.announcer import DEFAULT_ANNOUNCER_MODEL, try_load_announcer_voice
 from ..utils import spoken_text_converter as stc
 from ..utils.resources import resource_path
 from ..autonomy import AutonomyConfig, AutonomyLoop, ConstitutionalState, EventBus, InteractionState, SubagentConfig, SubagentManager, TaskManager, TaskSlotStore
@@ -117,9 +117,9 @@ class GladosConfig(BaseModel):
     asr_engine: str
     wake_word: str | None
     voice: str
-    # Optional local Piper ONNX (plus its .json sidecar) for the startup announcement
-    # and later notice lines. Unset, or a missing file, keeps those lines on `voice`.
-    announcer_model_path: str | None = None
+    # Relative repo path, same idea as models/TTS/glados.onnx. The ONNX and sidecar
+    # are a local drop-in; a missing file keeps notice lines on `voice`.
+    announcer_model_path: str | None = DEFAULT_ANNOUNCER_MODEL
     announcement: str | None
     llm_headers: dict[str, str] | None = None
     tui_theme: str | None = None

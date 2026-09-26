@@ -462,42 +462,24 @@ voice: "af_bella"
 
 ### Startup line: local Announcer voice
 
-The first line spoken at startup is `announcement` in `glados_config.yaml` (default: "All neural network modules are now loaded. System Operational."). `glados start` and the TUI both play it through `Glados.play_announcement` before conversation begins. That line, and later calls to `Glados.speak_notice(text)`, use an optional second Piper model. Every other line — LLM replies and the `speak` tool — stays on `voice` (the bundled GLaDOS Piper model when `voice: "glados"`).
+The first line spoken at startup is `announcement` in `glados_config.yaml` (default: "All neural network modules are now loaded. System Operational."). `glados start` and the TUI both play it through `Glados.play_announcement` before conversation begins. That line, and later calls to `Glados.speak_notice(text)`, use a second Piper model when it is present. Every other line — LLM replies and the `speak` tool — stays on `voice` (the bundled GLaDOS Piper model when `voice: "glados"`).
 
-This repo does not include the Announcer weights. Keep your own fine-tune on disk and point at the `.onnx` file. Do not commit the ONNX, the `.onnx.json` sidecar, wavs, or checkpoints.
-
-Place the pair next to each other:
+This repo does not include the Announcer weights. Copy your own ONNX into the checkout, in the same folder as `models/TTS/glados.onnx`. On Windows and in WSL that is the `models/TTS/` directory of this clone, not a path outside the repo. Do not commit the ONNX, the sidecar, wavs, or checkpoints. Those names are gitignored.
 
 ```text
-announcer.onnx
-announcer.onnx.json
+models/TTS/announcer.onnx
+models/TTS/announcer.onnx.json
 ```
 
-`announcer.json` is also accepted. Then set the ONNX path, or leave it unset to keep the startup line on the GLaDOS voice.
-
-Windows (`configs/glados_config.yaml`, forward slashes):
+`models/TTS/announcer.json` is also accepted. The default config already points at that relative path, resolved from the repo root the same way as `glados.onnx`:
 
 ```yaml
-announcer_model_path: "D:/local/voices/announcer.onnx"
+announcer_model_path: "models/TTS/announcer.onnx"
 ```
 
-WSL, when the files live on the Windows drive:
+`GLADOS_ANNOUNCER_MODEL` optionally overrides that path. Set it to empty to force the conversation voice even if the drop-in is present.
 
-```yaml
-announcer_model_path: "/mnt/d/local/voices/announcer.onnx"
-```
-
-Environment variable (overrides the YAML value; set it to empty to disable a path from the file):
-
-```bash
-# Windows PowerShell
-$env:GLADOS_ANNOUNCER_MODEL = "D:\local\voices\announcer.onnx"
-
-# WSL / Linux
-export GLADOS_ANNOUNCER_MODEL=/mnt/d/local/voices/announcer.onnx
-```
-
-If the path, the sidecar, or the ONNX session is missing, startup still speaks. That line uses the conversation voice and the process does not crash.
+If the ONNX, the sidecar, or the model session is missing, startup still speaks. That line uses the conversation voice and the process does not crash.
 
 ### Custom Personality
 

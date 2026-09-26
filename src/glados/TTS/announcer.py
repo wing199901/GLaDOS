@@ -12,23 +12,40 @@ from pathlib import Path
 
 from loguru import logger
 
+from ..utils.resources import resource_path
 from .piper_config import piper_config_candidates
 from .tts_glados import SpeechSynthesizer
+
+# Same layout as the bundled GLaDOS voice: models/TTS/glados.onnx beside glados.json.
+# The Announcer files are a local drop-in and are not shipped with the repo.
+DEFAULT_ANNOUNCER_MODEL = "models/TTS/announcer.onnx"
+
+
+def resolve_announcer_model_path(model_path: str) -> Path:
+    """Resolve an Announcer ONNX path the same way other repo models are resolved.
+
+    Relative paths, including the default ``models/TTS/announcer.onnx``, are
+    rooted at the project directory via :func:`resource_path`. An absolute path
+    is left as-is so ``GLADOS_ANNOUNCER_MODEL`` can still point elsewhere.
+    """
+    expanded = os.path.expandvars(os.path.expanduser(model_path.strip()))
+    path = Path(expanded)
+    if path.is_absolute():
+        return path
+    return resource_path(expanded)
 
 
 def try_load_announcer_voice(model_path: str | None) -> SpeechSynthesizer | None:
     """Load a local Announcer Piper ONNX, or return None so callers can fall back.
 
-    ``model_path`` is the ``.onnx`` file. The matching config is
-    ``<file>.onnx.json`` (standard Piper) or ``<stem>.json``. ``~`` and
-    environment variables in the path are expanded. Nothing in this function
-    downloads or vendors voice weights.
+    ``model_path`` is the ``.onnx`` file, usually ``models/TTS/announcer.onnx``.
+    The matching config is ``<file>.onnx.json`` (standard Piper) or ``<stem>.json``.
+    Nothing in this function downloads or vendors voice weights.
     """
     if model_path is None or not str(model_path).strip():
         return None
 
-    expanded = os.path.expandvars(os.path.expanduser(str(model_path).strip()))
-    onnx_path = Path(expanded)
+    onnx_path = resolve_announcer_model_path(model_path)
     if not onnx_path.is_file():
         logger.warning(
             f"Announcer voice model not found at {onnx_path}; "
