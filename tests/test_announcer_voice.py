@@ -795,6 +795,8 @@ def test_notice_chime_logs_and_holds_the_mic(monkeypatch: pytest.MonkeyPatch) ->
         "AudioPlayer received:" in text and "notice=True" in text and "ding_on_loaded=True" in text
         for text in messages
     )
+    assert any(text.startswith("notice chime start:") and "shape=(2,)" in text for text in messages)
+    assert any(text.startswith("notice chime start:") and "shape=(3,)" in text for text in messages)
     assert not hold.is_set()
 
 

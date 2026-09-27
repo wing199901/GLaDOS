@@ -42,7 +42,7 @@ def load_notice_chime(path_value: str | None) -> NoticeChime | None:
     repo root. Nothing here downloads or vendors audio.
     """
     if path_value is None or not str(path_value).strip():
-        logger.info("Notice chime skipped: path is empty.")
+        logger.error("Notice chime skipped: path is empty.")
         return None
 
     wav_path = resolve_repo_path(path_value)
@@ -63,7 +63,8 @@ def load_notice_chime(path_value: str | None) -> NoticeChime | None:
     mono = np.mean(data, axis=1).astype(np.float32, copy=False)
     duration_s = len(mono) / int(sample_rate)
     logger.success(
-        f"Notice chime loaded from {wav_path}: {int(sample_rate)} Hz, {len(mono)} samples, {duration_s:.2f}s."
+        f"Notice chime loaded from {wav_path}: shape={tuple(mono.shape)} sr={int(sample_rate)} "
+        f"samples={len(mono)} ({duration_s:.2f}s)."
     )
     return NoticeChime(audio=mono, sample_rate=int(sample_rate), source=str(wav_path))
 

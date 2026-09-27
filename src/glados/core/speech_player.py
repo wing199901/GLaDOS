@@ -107,7 +107,7 @@ class SpeechPlayer:
 
                 if tts_muted:
                     if self._uses_notice_chimes(audio_msg):
-                        logger.info("Notice chimes skipped: TTS is muted.")
+                        logger.error("Notice chimes skipped: TTS is muted.")
                     if audio_msg.text:
                         logger.info(f"Assistant: {audio_msg.text}")
                         if self._interaction_state:
@@ -208,14 +208,14 @@ class SpeechPlayer:
                             )
                     if self._uses_notice_chimes(audio_msg) and (not interrupted or self._chime_off_after_interrupt):
                         if interrupted:
-                            logger.info("Notice speech was interrupted; still playing ding_off.")
+                            logger.success("Notice speech was interrupted; still playing ding_off.")
                         self._hold_chime()
                         try:
                             self._play_notice_chime(self._chime_off, "ding_off")
                         finally:
                             self._release_chime()
                     elif self._uses_notice_chimes(audio_msg):
-                        logger.info(
+                        logger.error(
                             "Notice chime skipped (ding_off): speech was interrupted "
                             "and notice_chime_off_after_interrupt is off."
                         )
@@ -284,8 +284,13 @@ class SpeechPlayer:
         return bool(audio_msg.notice or audio_msg.speaker == SPEAKER_ANNOUNCER)
 
     def _play_chime_audio(self, playback: NoticeChime) -> tuple[bool, int]:
-        """Play a chime. Local sounddevice pauses the mic around that call."""
+        """Play a chime with start_speaking and measure, leaving the mic stream open."""
         play_chime = getattr(self.audio_io, "play_notice_chime", None)
+        logger.success(
+            "notice chime start: "
+            f"backend={type(self.audio_io).__name__} shape={tuple(playback.audio.shape)} "
+            f"sr={playback.sample_rate} play_notice_chime={callable(play_chime)}"
+        )
         if callable(play_chime):
             return play_chime(playback.audio, playback.sample_rate)
         self.audio_io.start_speaking(playback.audio, playback.sample_rate, interruptible=False)
