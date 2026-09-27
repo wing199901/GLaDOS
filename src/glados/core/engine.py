@@ -35,7 +35,13 @@ from ..observability import MindRegistry, ObservabilityBus, trim_message
 from ..vision import VisionConfig, VisionState
 from ..vision.constants import SYSTEM_PROMPT_VISION_HANDLING
 from .audio_data import AudioMessage
-from .notice_chimes import DEFAULT_NOTICE_CHIME_OFF, DEFAULT_NOTICE_CHIME_ON, NoticeChime, load_notice_chime
+from .notice_chimes import (
+    DEFAULT_NOTICE_CHIME_OFF,
+    DEFAULT_NOTICE_CHIME_ON,
+    NoticeChime,
+    describe_notice_chime,
+    load_notice_chime,
+)
 from .context import ContextBuilder
 from .audio_state import AudioState
 from .conversation_store import ConversationStore
@@ -884,7 +890,11 @@ class Glados:
             interruptible = self.interruptible
         logger.success("Playing announcement...")
         if self.announcement:
-            self.tts_queue.put(SpokenLine(self.announcement, notice=True))
+            line = SpokenLine(self.announcement, notice=True)
+            logger.success(
+                f"Queueing announcement SpokenLine: notice={line.notice} text={line.text!r}"
+            )
+            self.tts_queue.put(line)
             self.processing_active_event.set()
 
     def speak_notice(self, text: str) -> None:
@@ -896,8 +906,9 @@ class Glados:
         spoken = text.strip()
         if not spoken:
             return
-        logger.info("Queueing notice line.")
-        self.tts_queue.put(SpokenLine(spoken, notice=True))
+        line = SpokenLine(spoken, notice=True)
+        logger.success(f"Queueing notice SpokenLine: notice={line.notice} text={line.text!r}")
+        self.tts_queue.put(line)
         self.processing_active_event.set()
 
     @property
@@ -929,6 +940,10 @@ class Glados:
         tts_model, notice_tts_model = cls._build_tts_models(config)
         notice_chime_on = load_notice_chime(config.notice_chime_on)
         notice_chime_off = load_notice_chime(config.notice_chime_off)
+        logger.success(
+            "from_config notice chimes: "
+            f"on={describe_notice_chime(notice_chime_on)} off={describe_notice_chime(notice_chime_off)}"
+        )
 
         audio_io = get_audio_system(
             backend_type=config.audio_io,

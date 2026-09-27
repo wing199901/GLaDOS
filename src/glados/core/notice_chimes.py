@@ -73,7 +73,10 @@ def describe_notice_chime(clip: NoticeChime | None) -> str:
     if clip is None:
         return "not loaded"
     seconds = len(clip.audio) / clip.sample_rate if clip.sample_rate else 0.0
-    return f"{clip.source} ({clip.sample_rate} Hz, {len(clip.audio)} samples, {seconds:.2f}s)"
+    return (
+        f"{clip.source} shape={tuple(clip.audio.shape)} sr={clip.sample_rate} "
+        f"samples={len(clip.audio)} ({seconds:.2f}s)"
+    )
 
 
 def with_chime_edges(clip: NoticeChime, lead_s: float, tail_s: float) -> NoticeChime:

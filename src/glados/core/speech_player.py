@@ -84,6 +84,16 @@ class SpeechPlayer:
 
                 audio_len = len(audio_msg.audio) if audio_msg.audio is not None else 0
                 tts_muted = bool(self._tts_muted_event and self._tts_muted_event.is_set())
+                if not audio_msg.is_eos:
+                    logger.success(
+                        "AudioPlayer received: "
+                        f"notice={audio_msg.notice} speaker={audio_msg.speaker} samples={audio_len} "
+                        f"ding_on_loaded={self._chime_on is not None} "
+                        f"ding_off_loaded={self._chime_off is not None} "
+                        f"ding_on={describe_notice_chime(self._chime_on)} "
+                        f"ding_off={describe_notice_chime(self._chime_off)} "
+                        f"text={audio_msg.text!r}"
+                    )
 
                 if audio_msg.is_eos:
                     logger.debug("AudioPlayer: Processing end of stream token.")
@@ -227,7 +237,7 @@ class SpeechPlayer:
     def _log_armed_chime(label: str, clip: NoticeChime | None) -> None:
         detail = describe_notice_chime(clip)
         if clip is None:
-            logger.info(f"Notice chime {label} not armed: {detail}.")
+            logger.error(f"Notice chime {label} not armed: {detail}.")
         else:
             logger.success(f"Notice chime {label} armed: {detail}.")
 

@@ -112,17 +112,8 @@ class SoundDeviceAudioIO(AudioIO):
         self._pending_audio: NDArray[np.float32] | None = None
         self._pending_sample_rate: int = self.SAMPLE_RATE
         self._playback_interruptible = True
-        self._chime_mic_paused = False
-        # start_listening calls stop_listening. Notice chimes hold this across
-        # both so the mic cannot reopen in the middle of a ding.
-        self._io_lock = threading.RLock()
 
     def start_listening(self) -> None:
-        """Start capturing audio from the system microphone."""
-        with self._io_lock:
-            self._open_input_stream()
-
-    def _open_input_stream(self) -> None:
         """Start capturing audio from the system microphone.
 
         Creates and starts a sounddevice InputStream that continuously captures
@@ -182,10 +173,6 @@ class SoundDeviceAudioIO(AudioIO):
         This method should be called when audio input is no longer needed or
         before application shutdown.
         """
-        with self._io_lock:
-            self._close_input_stream()
-
-    def _close_input_stream(self) -> None:
         if self.input_stream is not None:
             try:
                 self.input_stream.stop()
@@ -200,54 +187,40 @@ class SoundDeviceAudioIO(AudioIO):
         audio_data: NDArray[np.float32],
         sample_rate: int | None = None,
     ) -> tuple[bool, int]:
-        """Play one notice chime the way the isolated speaker test does.
+        """Play one notice chime with the calls that are audible while ASR is open.
 
-        ``glados start`` opens the microphone before announcement synthesis
-        finishes, so the ding used to share the device with that input stream.
-        The same ``start_speaking`` + ``measure_percentage_spoken`` calls are
-        audible when no input stream is open. This pauses the microphone for
-        the ding, then restarts it. A callback that finishes with no frames
-        is retried with a blocking write. Speech after the chime still uses
-        the normal path.
+        ``start_speaking`` then ``measure_percentage_spoken``, with the microphone
+        input stream left running. A callback that finishes with no frames is
+        retried with a blocking write. That 0% result used to come back as a
+        clean completion.
         """
-        with self._io_lock:
-            mic_was_open = self.input_stream is not None
-            if mic_was_open:
-                logger.success("Pausing microphone so the notice chime can play.")
-                self._close_input_stream()
-            try:
-                self._chime_mic_paused = mic_was_open
-                self.start_speaking(audio_data, sample_rate, interruptible=False)
-                prepared = self._pending_audio
-                prepared_rate = self._pending_sample_rate
-                interrupted, percentage = self.measure_percentage_spoken(
-                    len(audio_data),
-                    prepared_rate,
-                )
-                if percentage <= 0:
-                    logger.error(
-                        "Notice chime callback finished with no audible frames "
-                        f"(interrupted={interrupted}, {percentage}%). Retrying with a blocking write."
-                    )
-                    if prepared is None or prepared.size == 0:
-                        return True, 0
-                    interrupted, percentage = self._blocking_chime_write(prepared, prepared_rate)
-                if percentage <= 0:
-                    logger.error(
-                        f"Notice chime still produced no audio after retry ({percentage}%, "
-                        f"interrupted={interrupted})."
-                    )
-                return interrupted, percentage
-            finally:
-                self._chime_mic_paused = False
-                if mic_was_open:
-                    try:
-                        self._open_input_stream()
-                        logger.info("Microphone resumed after notice chime.")
-                    except Exception:  # noqa: BLE001 - speech still plays if the mic fails to reopen
-                        logger.exception(
-                            "Microphone did not resume after a notice chime. The spoken line will still play."
-                        )
+        logger.success(
+            "PLAYING notice chime via start_speaking: "
+            f"shape={getattr(audio_data, 'shape', None)} sr={sample_rate} "
+            f"input_stream_open={self.input_stream is not None}"
+        )
+        self.start_speaking(audio_data, sample_rate, interruptible=False)
+        prepared = self._pending_audio
+        prepared_rate = self._pending_sample_rate
+        interrupted, percentage = self.measure_percentage_spoken(len(audio_data), prepared_rate)
+        if percentage <= 0:
+            logger.error(
+                "Notice chime callback finished with no audible frames "
+                f"(interrupted={interrupted}, {percentage}%). Retrying with a blocking write."
+            )
+            if prepared is None or prepared.size == 0:
+                return True, 0
+            interrupted, percentage = self._blocking_chime_write(prepared, prepared_rate)
+        if percentage <= 0:
+            logger.error(
+                f"Notice chime still produced no audio after retry ({percentage}%, interrupted={interrupted})."
+            )
+        else:
+            logger.success(
+                f"PLAYED notice chime via start_speaking: {percentage}% interrupted={interrupted} "
+                f"input_stream_open={self.input_stream is not None}"
+            )
+        return interrupted, percentage
 
     def _blocking_chime_write(self, audio_data: NDArray[np.float32], sample_rate: int) -> tuple[bool, int]:
         """Write a chime without a callback. Used when the callback path plays nothing."""
@@ -339,7 +312,8 @@ class SoundDeviceAudioIO(AudioIO):
         """
         audio_data = self._pending_audio
         if audio_data is None:
-            return False, 100
+            logger.error("measure_percentage_spoken: no audio was queued, so playback did not start.")
+            return False, 0
 
         # Prefer the sample rate stored by start_speaking() -- that reflects any
         # device-rate resampling that happened, so the stream opens at the true
@@ -350,20 +324,21 @@ class SoundDeviceAudioIO(AudioIO):
             sample_rate = self._pending_sample_rate
 
         if sample_rate is None or sample_rate <= 0:
-            logger.warning(f"Invalid sample rate {sample_rate}; skipping playback")
+            logger.error(f"Invalid sample rate {sample_rate}; playback did not start.")
             if self._pending_audio is audio_data:
                 self._pending_audio = None
                 self._is_playing = False
-            return False, 100
+            return False, 0
 
         # Derive playback length from the actual buffer so a wrong caller-supplied
         # total_samples can't break the timeout or percentage math.
         effective_total = len(audio_data)
         if effective_total <= 0:
+            logger.error("measure_percentage_spoken: queued audio is empty, so playback did not start.")
             if self._pending_audio is audio_data:
                 self._pending_audio = None
                 self._is_playing = False
-            return False, 100
+            return False, 0
 
         position = 0
         interrupted = False
@@ -401,7 +376,7 @@ class SoundDeviceAudioIO(AudioIO):
                 logger.success(
                     f"PLAYING notice chime on output device: {effective_total} samples, "
                     f"{sample_rate} Hz, {effective_total / sample_rate:.2f}s, "
-                    f"mic_paused={self._chime_mic_paused}"
+                    f"input_stream_open={self.input_stream is not None}"
                 )
 
             def _playback_finished() -> None:
@@ -435,12 +410,12 @@ class SoundDeviceAudioIO(AudioIO):
                         logger.success(
                             f"PLAYED notice chime on output device: {sample_rate} Hz, "
                             f"{min(int(position / effective_total * 100), 100)}%, interrupted={interrupted}, "
-                            f"mic_paused={self._chime_mic_paused}"
+                            f"input_stream_open={self.input_stream is not None}"
                         )
                     else:
                         logger.error(
                             "Notice chime output stream ended before any frames were written "
-                            f"(interrupted={interrupted}, mic_paused={self._chime_mic_paused})."
+                            f"(interrupted={interrupted}, input_stream_open={self.input_stream is not None})."
                         )
 
         except (sd.PortAudioError, RuntimeError) as exc:

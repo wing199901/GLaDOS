@@ -791,7 +791,10 @@ def test_notice_chime_logs_and_holds_the_mic(monkeypatch: pytest.MonkeyPatch) ->
     assert started in messages
     assert "PLAYED notice chime ding_on from models/SFX/ding_on.wav at 100%" in messages
     assert "PLAYED notice chime ding_off from models/SFX/ding_off.wav at 100%" in messages
-    assert any(text.startswith("Notice playback starting:") and "notice=True" in text for text in messages)
+    assert any(
+        "AudioPlayer received:" in text and "notice=True" in text and "ding_on_loaded=True" in text
+        for text in messages
+    )
     assert not hold.is_set()
 
 
@@ -974,22 +977,13 @@ def test_failed_chime_stream_is_not_reported_as_played() -> None:
     assert finalize_spoken_playback(40, 80, False, stream_failed=False, chime=True) == (False, 50)
 
 
-def test_notice_chime_pauses_an_open_mic_and_retries_a_silent_callback() -> None:
+def test_notice_chime_keeps_the_input_stream_open_and_retries_silence() -> None:
     io = SoundDeviceAudioIO.__new__(SoundDeviceAudioIO)
-    io._io_lock = threading.RLock()
-    io.input_stream = object()
+    mic = object()
+    io.input_stream = mic
     io._pending_audio = None
     io._pending_sample_rate = 44100
-    io._chime_mic_paused = False
     events: list[object] = []
-
-    def stop_stream() -> None:
-        events.append("stop_mic")
-        io.input_stream = None
-
-    def open_stream() -> None:
-        events.append("start_mic")
-        io.input_stream = object()
 
     def start_speaking(
         audio_data: NDArray[np.float32],
@@ -997,20 +991,18 @@ def test_notice_chime_pauses_an_open_mic_and_retries_a_silent_callback() -> None
         text: str = "",
         interruptible: bool = True,
     ) -> None:
-        events.append(("start", interruptible, len(audio_data)))
+        events.append(("start", interruptible, tuple(audio_data.shape)))
         io._pending_audio = audio_data
         io._pending_sample_rate = int(sample_rate or 0)
 
     def measure(total_samples: int, sample_rate: int | None = None) -> tuple[bool, int]:
-        events.append(("measure", total_samples, io._chime_mic_paused))
+        events.append(("measure", total_samples, io.input_stream is mic))
         return False, 0
 
     def blocking(audio_data: NDArray[np.float32], sample_rate: int) -> tuple[bool, int]:
         events.append(("blocking", sample_rate, len(audio_data)))
         return False, 100
 
-    io._close_input_stream = stop_stream  # type: ignore[method-assign]
-    io._open_input_stream = open_stream  # type: ignore[method-assign]
     io.start_speaking = start_speaking  # type: ignore[method-assign]
     io.measure_percentage_spoken = measure  # type: ignore[method-assign]
     io._blocking_chime_write = blocking  # type: ignore[method-assign]
@@ -1019,23 +1011,20 @@ def test_notice_chime_pauses_an_open_mic_and_retries_a_silent_callback() -> None
     interrupted, percentage = io.play_notice_chime(clip, 44100)
 
     assert (interrupted, percentage) == (False, 100)
+    assert io.input_stream is mic
     assert events == [
-        "stop_mic",
-        ("start", False, 8),
+        ("start", False, (8,)),
         ("measure", 8, True),
         ("blocking", 44100, 8),
-        "start_mic",
     ]
-    assert io._chime_mic_paused is False
 
 
-def test_notice_chime_leaves_a_closed_mic_closed_when_the_callback_plays() -> None:
+def test_notice_chime_callback_success_does_not_touch_the_mic() -> None:
     io = SoundDeviceAudioIO.__new__(SoundDeviceAudioIO)
-    io._io_lock = threading.RLock()
-    io.input_stream = None
+    mic = object()
+    io.input_stream = mic
     io._pending_audio = None
     io._pending_sample_rate = 44100
-    io._chime_mic_paused = False
     events: list[object] = []
 
     def start_speaking(
@@ -1052,8 +1041,6 @@ def test_notice_chime_leaves_a_closed_mic_closed_when_the_callback_plays() -> No
         events.append("measure")
         return False, 100
 
-    io._close_input_stream = lambda: events.append("stop_mic")  # type: ignore[method-assign]
-    io._open_input_stream = lambda: events.append("start_mic")  # type: ignore[method-assign]
     io.start_speaking = start_speaking  # type: ignore[method-assign]
     io.measure_percentage_spoken = measure  # type: ignore[method-assign]
     io._blocking_chime_write = lambda *_args: events.append("blocking")  # type: ignore[method-assign]
@@ -1062,3 +1049,18 @@ def test_notice_chime_leaves_a_closed_mic_closed_when_the_callback_plays() -> No
 
     assert (interrupted, percentage) == (False, 100)
     assert events == ["start", "measure"]
+    assert io.input_stream is mic
+
+
+def test_cli_and_tui_both_pass_loaded_chimes_through_from_config() -> None:
+    root = Path(__file__).resolve().parents[1]
+    cli_source = (root / "src" / "glados" / "cli.py").read_text(encoding="utf-8")
+    tui_source = (root / "src" / "glados" / "tui.py").read_text(encoding="utf-8")
+    engine_source = (root / "src" / "glados" / "core" / "engine.py").read_text(encoding="utf-8")
+
+    assert "Glados.from_config" in cli_source
+    assert "Glados.from_config" in tui_source
+    assert "notice_chime_on=notice_chime_on" in engine_source
+    assert "notice_chime_off=notice_chime_off" in engine_source
+    assert "chime_on=self._notice_chime_on" in engine_source
+    assert "chime_off=self._notice_chime_off" in engine_source
