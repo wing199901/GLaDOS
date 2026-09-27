@@ -11,10 +11,13 @@ from ..observability import ObservabilityBus, trim_message
 from .audio_data import SPEAKER_ANNOUNCER, AudioMessage
 from .conversation_store import ConversationStore
 from .notice_chimes import (
+    DEFAULT_CHIME_GAIN,
     DEFAULT_CHIME_GAP_S,
     DEFAULT_CHIME_LEAD_S,
     DEFAULT_CHIME_TAIL_S,
     NoticeChime,
+    apply_chime_gain,
+    chime_peak,
     describe_notice_chime,
     with_chime_edges,
 )
@@ -47,6 +50,7 @@ class SpeechPlayer:
         chime_lead_s: float = DEFAULT_CHIME_LEAD_S,
         chime_tail_s: float = DEFAULT_CHIME_TAIL_S,
         chime_gap_s: float = DEFAULT_CHIME_GAP_S,
+        chime_gain: float = DEFAULT_CHIME_GAIN,
     ) -> None:
         self.audio_io = audio_io
         self.audio_output_queue = audio_output_queue
@@ -66,6 +70,7 @@ class SpeechPlayer:
         self._chime_lead_s = chime_lead_s
         self._chime_tail_s = chime_tail_s
         self._chime_gap_s = chime_gap_s
+        self._chime_gain = chime_gain
         self._log_armed_chime("ding_on", chime_on)
         self._log_armed_chime("ding_off", chime_off)
 
@@ -160,6 +165,10 @@ class SpeechPlayer:
                         try:
                             self._play_notice_chime(self._chime_on, "ding_on")
                             if self._chime_on is not None and self._chime_gap_s > 0:
+                                logger.success(
+                                    f"Waiting {self._chime_gap_s:.2f}s after ding_on before speech "
+                                    "so the output device can finish the ding."
+                                )
                                 time.sleep(self._chime_gap_s)
                         finally:
                             self._release_chime()
@@ -207,8 +216,11 @@ class SpeechPlayer:
                                 message=trim_message(audio_msg.text),
                             )
                     if self._uses_notice_chimes(audio_msg) and (not interrupted or self._chime_off_after_interrupt):
-                        if interrupted:
-                            logger.success("Notice speech was interrupted; still playing ding_off.")
+                        logger.success(
+                            "Notice chime ding_off after speech: "
+                            f"interrupted={interrupted} spoken={percentage_played}% "
+                            f"off_after_interrupt={self._chime_off_after_interrupt}"
+                        )
                         self._hold_chime()
                         try:
                             self._play_notice_chime(self._chime_off, "ding_off")
@@ -255,8 +267,13 @@ class SpeechPlayer:
             logger.error(f"Notice chime skipped ({label}): empty clip at {clip.source}.")
             return
 
-        playback = with_chime_edges(clip, self._chime_lead_s, self._chime_tail_s)
+        boosted = apply_chime_gain(clip, self._chime_gain)
+        playback = with_chime_edges(boosted, self._chime_lead_s, self._chime_tail_s)
         seconds = len(clip.audio) / clip.sample_rate if clip.sample_rate else 0.0
+        logger.success(
+            f"Notice chime playback start ({label}): sr={clip.sample_rate} samples={len(clip.audio)} "
+            f"peak={chime_peak(clip):.3f} gain={self._chime_gain:.2f} boosted_peak={chime_peak(boosted):.3f}"
+        )
         logger.success(
             f"PLAYING notice chime {label} from {clip.source}: "
             f"{clip.sample_rate} Hz, {len(clip.audio)} samples, {seconds:.2f}s"
@@ -267,6 +284,9 @@ class SpeechPlayer:
             logger.exception(f"Notice chime failed ({label}) from {clip.source}; continuing without that chime.")
             return
 
+        logger.success(
+            f"Notice chime playback done ({label}): interrupted={interrupted} pct={percentage}"
+        )
         if percentage <= 0:
             logger.error(
                 f"Notice chime produced no audio ({label}) from {clip.source}: "
