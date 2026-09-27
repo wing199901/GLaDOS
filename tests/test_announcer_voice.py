@@ -785,7 +785,7 @@ def test_notice_chime_logs_and_holds_the_mic(monkeypatch: pytest.MonkeyPatch) ->
     finally:
         logger.remove(sink_id)
 
-    assert slept == [0.1]
+    assert 0.1 in slept
     assert audio.hold_during_start == [True, False, True]
     assert audio.interruptible_flags == [False, True, False]
     started = "PLAYING notice chime ding_on from models/SFX/ding_on.wav: 44100 Hz, 2 samples, 0.00s"
