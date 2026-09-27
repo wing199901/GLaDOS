@@ -304,10 +304,15 @@ class SpeechPlayer:
         return self.audio_io.measure_percentage_spoken(len(playback.audio), playback.sample_rate)
 
     def _finish_startup_notice(self, audio_msg: AudioMessage | None) -> None:
-        """Let run() open the microphone after this notice, including ding_off."""
+        """Let run() open the microphone after the last startup line.
+
+        A notice with a GLaDOS follow-up does not release the microphone at
+        ding_off. The follow-up is ordinary conversation speech, and it carries
+        ``ends_startup`` so the input stream stays closed until that line ends.
+        """
         if audio_msg is None or audio_msg.is_eos or self._startup_notice_done is None:
             return
-        if not self._uses_notice_chimes(audio_msg):
+        if not audio_msg.ends_startup:
             return
         self._startup_notice_done.set()
 
@@ -328,13 +333,18 @@ class SpeechPlayer:
 
         logger.debug("AudioPlayer: Clearing audio queue due to interruption.")
         self.currently_speaking_event.clear()
-        # with self.audio_output_queue.mutex:
-        #     self.audio_output_queue.queue.clear()
+        # Keep the startup follow-up. Dropping it would leave the microphone
+        # closed until the startup wait times out.
+        kept: list[AudioMessage] = []
         try:
             while True:
-                self.audio_output_queue.get_nowait()
+                pending = self.audio_output_queue.get_nowait()
+                if pending.ends_startup:
+                    kept.append(pending)
         except queue.Empty:
             pass
+        for pending in kept:
+            self.audio_output_queue.put(pending)
 
     def clip_interrupted_sentence(self, generated_text: str, percentage_played: float) -> str:
         """

@@ -135,6 +135,10 @@ class GladosConfig(BaseModel):
     # Mic echo often interrupts the notice speech. Still play ding_off unless this is false.
     notice_chime_off_after_interrupt: bool = True
     announcement: str | None
+    # Spoken by the conversation voice (`voice`) after the startup notice and ding_off.
+    # No Announcer model and no PA chimes. Empty or missing skips the line.
+    # Personal/local fun only; edit the string freely. speak_notice does not append it.
+    announcement_followup: str | None = None
     llm_headers: dict[str, str] | None = None
     tui_theme: str | None = None
     personality_preprompt: list[PersonalityPrompt]
@@ -253,12 +257,12 @@ class GladosConfig(BaseModel):
 
 
 def wait_for_startup_notice(done: threading.Event, timeout: float) -> bool:
-    """Wait until the startup notice has finished, then let the microphone open.
+    """Wait until the startup lines have finished, then let the microphone open.
 
     The first output stream opened while the input stream is already up can be
-    swallowed for the length of a ~0.2s ding. The announcement and ding_off are
-    long enough to survive that. Opening the microphone after ding_off keeps
-    ding_on ahead of that warmup.
+    swallowed for the length of a ~0.2s ding. The announcement, ding_off, and
+    an optional GLaDOS follow-up are long enough to survive that. Opening the
+    microphone after the last of those lines keeps ding_on ahead of that warmup.
     """
     if done.is_set():
         return True
@@ -302,6 +306,7 @@ class Glados:
         interruptible: bool = True,
         wake_word: str | None = None,
         announcement: str | None = None,
+        announcement_followup: str | None = None,
         personality_preprompt: tuple[dict[str, str], ...] = DEFAULT_PERSONALITY_PREPROMPT,
         tool_config: dict[str, Any] | None = None,
         tool_timeout: float = 30.0,
@@ -342,6 +347,9 @@ class Glados:
             interruptible (bool): Whether the assistant can be interrupted while speaking.
             wake_word (str | None): Optional wake word to trigger the assistant.
             announcement (str | None): Optional announcement to play on startup.
+            announcement_followup (str | None): Optional second startup line. Spoken
+                with the conversation voice after the notice and ding_off, with no
+                PA chimes. Empty skips it. ``speak_notice`` does not append it.
             personality_preprompt (tuple[dict[str, str], ...]): Initial personality preprompt messages.
             tool_config (dict[str, Any] | None): Configuration for tools (e.g., audio paths).
             tool_timeout (float): Timeout in seconds for tool execution.
@@ -365,6 +373,7 @@ class Glados:
         self.interruptible = interruptible
         self.wake_word = wake_word
         self.announcement = announcement
+        self.announcement_followup = announcement_followup
         self.tool_config = tool_config or {}
         self.tool_timeout = tool_timeout
         self.mcp_servers = mcp_servers or []
@@ -412,8 +421,8 @@ class Glados:
         self.currently_speaking_event = threading.Event()  # Indicates if the assistant is currently speaking
         # Set while a notice chime is playing so the mic does not treat it as the user.
         self.notice_chime_hold_event = threading.Event()
-        # Set until play_announcement queues the startup notice. run() waits for the
-        # player to set it again so the microphone opens after ding_on, not during it.
+        # Set until play_announcement queues startup audio. run() waits for the
+        # player to set it again after the last startup line, including a follow-up.
         self.startup_notice_done = threading.Event()
         self.startup_notice_done.set()
         self.shutdown_event = threading.Event()  # Event to signal shutdown of all threads
@@ -903,7 +912,8 @@ class Glados:
 
         This method checks if an announcement is set and, if so, places it in the TTS queue as a notice line.
         That startup line uses the Announcer Piper model when ``announcer_model_path`` loaded; otherwise it uses
-        the conversation voice. Later conversation lines are not notice lines.
+        the conversation voice. An optional ``announcement_followup`` is queued after it on the conversation
+        voice, with no PA chimes. Later conversation lines and ``speak_notice`` are not part of that sequence.
         If the `interruptible` parameter is set to `True`, it allows the announcement to be interrupted by other
         audio playback. If `interruptible` is `None`, it defaults to the instance's `interruptible` setting.
 
@@ -915,15 +925,39 @@ class Glados:
         if interruptible is None:
             interruptible = self.interruptible
         logger.success("Playing announcement...")
-        if self.announcement:
-            line = SpokenLine(self.announcement, notice=True)
+        lines = Glados._startup_lines(self)
+        if not lines:
+            return
+        # Clear before the queue put so run() cannot miss a fast playback.
+        self.startup_notice_done.clear()
+        for line in lines:
             logger.success(
-                f"Queueing announcement SpokenLine: notice={line.notice} text={line.text!r}"
+                "Queueing startup SpokenLine: "
+                f"notice={line.notice} ends_startup={line.ends_startup} text={line.text!r}"
             )
-            # Clear before the queue put so run() cannot miss a fast playback.
-            self.startup_notice_done.clear()
             self.tts_queue.put(line)
-            self.processing_active_event.set()
+        self.processing_active_event.set()
+
+    def _startup_lines(self) -> list[SpokenLine]:
+        """Notice line, then an optional conversation-voice follow-up.
+
+        The follow-up belongs only to this startup sequence. ``speak_notice``
+        does not append it. The last queued line ends the microphone wait,
+        so a follow-up keeps the input stream closed through ding_off and the
+        GLaDOS line.
+        """
+        notice = (self.announcement or "").strip()
+        followup = (self.announcement_followup or "").strip()
+        lines: list[SpokenLine] = []
+        if notice:
+            lines.append(SpokenLine(notice, notice=True))
+        if followup:
+            lines.append(SpokenLine(followup, notice=False))
+        if not lines:
+            return lines
+        last = lines[-1]
+        lines[-1] = SpokenLine(last.text, notice=last.notice, ends_startup=True)
+        return lines
 
     def speak_notice(self, text: str) -> None:
         """Queue a short system line on the Announcer voice when that model is configured.
@@ -993,6 +1027,7 @@ class Glados:
                 interruptible=config.interruptible,
                 wake_word=config.wake_word,
                 announcement=config.announcement,
+                announcement_followup=config.announcement_followup,
                 personality_preprompt=tuple(config.to_chat_messages()),
                 tool_config={"slow_clap_audio_path": config.slow_clap_audio_path},
                 tool_timeout=config.tool_timeout,
