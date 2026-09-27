@@ -17,6 +17,12 @@ Glados:
   # Do not commit the ONNX, sidecar, wavs, or checkpoints. A missing file uses `voice`.
   # Optional override: GLADOS_ANNOUNCER_MODEL (set it empty to disable the Announcer voice).
   announcer_model_path: "models/TTS/announcer.onnx"
+  # PA chimes around notice lines only (play_announcement and speak_notice).
+  # Copy your own ding_on.wav and ding_off.wav into models/SFX/. Never commit Valve audio.
+  # A missing file is skipped. Optional overrides: GLADOS_NOTICE_CHIME_ON / GLADOS_NOTICE_CHIME_OFF
+  # (set either to empty to disable that chime). Conversation lines do not play these.
+  notice_chime_on: "models/SFX/ding_on.wav"
+  notice_chime_off: "models/SFX/ding_off.wav"
   announcement: "All neural network modules are now loaded. System Operational."
   autonomy:
     enabled: false

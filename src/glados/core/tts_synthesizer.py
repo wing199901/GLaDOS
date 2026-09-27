@@ -109,6 +109,7 @@ class TextToSpeechSynthesizer:
                             is_eos=False,
                             sample_rate=voice.sample_rate,
                             speaker=SPEAKER_ANNOUNCER if voice is self.notice_model else SPEAKER_GLADOS,
+                            notice=use_notice,
                         )
                     )
             except queue.Empty:

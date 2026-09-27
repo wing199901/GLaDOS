@@ -10,6 +10,7 @@ from ..audio_io import AudioProtocol
 from ..observability import ObservabilityBus, trim_message
 from .audio_data import AudioMessage
 from .conversation_store import ConversationStore
+from .notice_chimes import NoticeChime
 
 
 class SpeechPlayer:
@@ -32,6 +33,8 @@ class SpeechPlayer:
         tts_muted_event: threading.Event | None = None,
         interaction_state: "InteractionState | None" = None,
         observability_bus: ObservabilityBus | None = None,
+        chime_on: NoticeChime | None = None,
+        chime_off: NoticeChime | None = None,
     ) -> None:
         self.audio_io = audio_io
         self.audio_output_queue = audio_output_queue
@@ -44,6 +47,8 @@ class SpeechPlayer:
         self._tts_muted_event = tts_muted_event
         self._interaction_state = interaction_state
         self._observability_bus = observability_bus
+        self._chime_on = chime_on
+        self._chime_off = chime_off
 
     def run(self) -> None:
         """
@@ -109,13 +114,19 @@ class SpeechPlayer:
                             meta={"audio_samples": audio_len, "speaker": audio_msg.speaker},
                         )
 
-                    self.audio_io.start_speaking(audio_msg.audio, playback_rate)
-                    logger.success(f"TTS text: {audio_msg.text}")
-
-                    # Wait for the audio to finish playing or be interrupted
-                    interrupted, percentage_played = self.audio_io.measure_percentage_spoken(
-                        audio_len, playback_rate
-                    )
+                    # Notice lines: ding_on, then speech, then ding_off after speech
+                    # finishes. Conversation lines leave both clips unused. A missing
+                    # clip is None and is skipped. An interrupt during ding_on skips
+                    # the speech and ding_off. An interrupt during speech skips ding_off.
+                    chime_interrupted = audio_msg.notice and self._play_chime(self._chime_on)
+                    if chime_interrupted:
+                        interrupted, percentage_played = True, 0
+                    else:
+                        self.audio_io.start_speaking(audio_msg.audio, playback_rate)
+                        logger.success(f"TTS text: {audio_msg.text}")
+                        interrupted, percentage_played = self.audio_io.measure_percentage_spoken(
+                            audio_len, playback_rate
+                        )
 
                     if interrupted:
                         clipped_text = self.clip_interrupted_sentence(audio_msg.text, percentage_played)
@@ -153,7 +164,11 @@ class SpeechPlayer:
                                 kind="finish",
                                 message=trim_message(audio_msg.text),
                             )
-                        
+                        if audio_msg.notice:
+                            # ding_off is after the line is done. Stopping it does not
+                            # rewind the spoken text or clear the rest of the queue.
+                            self._play_chime(self._chime_off)
+
                     self.currently_speaking_event.clear()
     
                 else:
@@ -166,6 +181,21 @@ class SpeechPlayer:
                 logger.exception(f"AudioPlayer: Unexpected error in run loop: {e}")
                 time.sleep(self.pause_time)  # small sleep here to prevent tight loop on persistent error
         logger.info("AudioPlayer thread finished.")
+
+    def _play_chime(self, clip: NoticeChime | None) -> bool:
+        """Play one chime and return whether the listener interrupted it.
+
+        A missing or unreadable clip returns False so speech still plays.
+        """
+        if clip is None or clip.audio.size == 0:
+            return False
+        try:
+            self.audio_io.start_speaking(clip.audio, clip.sample_rate)
+            interrupted, _percentage = self.audio_io.measure_percentage_spoken(len(clip.audio), clip.sample_rate)
+            return bool(interrupted)
+        except Exception:  # noqa: BLE001 - a bad chime must not drop the spoken line
+            logger.exception("Notice chime playback failed; continuing without that chime.")
+            return False
 
     def _clear_audio_queue(self) -> None:
         """Clears the audio output queue and resets the speaking event.

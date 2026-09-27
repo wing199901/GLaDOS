@@ -27,6 +27,8 @@ class AudioMessage:
         speaker: Name shown in the TUI for this line. Notice lines that were
             actually synthesized with the Announcer model use ``Announcer``.
             A missing Announcer model keeps ``GLaDOS``.
+        notice: True for startup and ``speak_notice`` lines. PA chimes follow
+            this flag even when the voice falls back to GLaDOS.
     """
 
     audio: NDArray[np.float32]
@@ -34,6 +36,7 @@ class AudioMessage:
     is_eos: bool = False
     sample_rate: int | None = None
     speaker: str = SPEAKER_GLADOS
+    notice: bool = False
 
 
 def tts_dialog_role(meta: dict[str, Any] | None) -> str:
