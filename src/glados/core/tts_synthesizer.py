@@ -57,10 +57,11 @@ class TextToSpeechSynthesizer:
         while not self.shutdown_event.is_set():
             try:
                 queued = self.tts_input_queue.get(timeout=self.pause_time)
-                text_to_speak, use_notice = self._read_queue_item(queued)
+                text_to_speak, use_notice, ends_startup = self._read_queue_item(queued)
                 logger.success(
                     "TTS dequeued: "
-                    f"type={type(queued).__name__} notice={use_notice} text={text_to_speak!r}"
+                    f"type={type(queued).__name__} notice={use_notice} "
+                    f"ends_startup={ends_startup} text={text_to_speak!r}"
                 )
 
                 if text_to_speak == "<EOS>":
@@ -110,7 +111,8 @@ class TextToSpeechSynthesizer:
                     speaker = SPEAKER_ANNOUNCER if voice is self.notice_model else SPEAKER_GLADOS
                     logger.success(
                         "TTS produced AudioMessage: "
-                        f"notice={use_notice} speaker={speaker} shape={getattr(audio_data, 'shape', None)} "
+                        f"notice={use_notice} speaker={speaker} ends_startup={ends_startup} "
+                        f"shape={getattr(audio_data, 'shape', None)} "
                         f"sr={voice.sample_rate} text={spoken_text_variant!r}"
                     )
                     self.audio_output_queue.put(
@@ -121,6 +123,7 @@ class TextToSpeechSynthesizer:
                             sample_rate=voice.sample_rate,
                             speaker=speaker,
                             notice=use_notice,
+                            ends_startup=ends_startup,
                         )
                     )
             except queue.Empty:
@@ -133,11 +136,11 @@ class TextToSpeechSynthesizer:
         logger.info("TextToSpeechSynthesizer thread finished.")
 
     @staticmethod
-    def _read_queue_item(item: TtsQueueItem) -> tuple[str, bool]:
-        """Return text and whether this line should use the notice voice."""
+    def _read_queue_item(item: TtsQueueItem) -> tuple[str, bool, bool]:
+        """Return text, the notice-voice flag, and whether this line ends startup."""
         if isinstance(item, SpokenLine):
-            return item.text, item.notice
-        return item, False
+            return item.text, item.notice, item.ends_startup
+        return item, False, False
 
     def _voice_for(self, use_notice: bool) -> SpeechSynthesizerProtocol:
         """Select the Announcer model for a notice line, otherwise the conversation voice."""

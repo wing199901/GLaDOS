@@ -283,6 +283,7 @@ def test_shipped_config_uses_in_repo_announcer_path(monkeypatch: pytest.MonkeyPa
     assert loaded.notice_chime_on is not None
     assert not Path(loaded.notice_chime_on).is_absolute()
     assert loaded.notice_chime_off_after_interrupt is True
+    assert loaded.announcement_followup == "Oh. It's you."
 
 
 def test_relative_announcer_path_resolves_from_package_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -317,23 +318,58 @@ def test_build_tts_models_keeps_conversation_voice_and_loads_notice(
     assert notice == "notice:models/TTS/announcer.onnx"
 
 
-def test_play_announcement_is_a_notice_line() -> None:
-    class _Host:
-        def __init__(self) -> None:
-            self.announcement = "All neural network modules are now loaded. System Operational."
-            self.interruptible = True
-            self.processing_active_event = threading.Event()
-            self.startup_notice_done = threading.Event()
-            self.startup_notice_done.set()
-            self.tts_queue: queue.Queue[str | SpokenLine] = queue.Queue()
+class _AnnouncementHost:
+    def __init__(self, announcement: str | None, followup: str | None) -> None:
+        self.announcement = announcement
+        self.announcement_followup = followup
+        self.interruptible = True
+        self.processing_active_event = threading.Event()
+        self.startup_notice_done = threading.Event()
+        self.startup_notice_done.set()
+        self.tts_queue: queue.Queue[str | SpokenLine] = queue.Queue()
 
-    host = _Host()
+
+def _announcement_host(announcement: str | None, followup: str | None) -> _AnnouncementHost:
+    return _AnnouncementHost(announcement, followup)
+
+
+def test_play_announcement_is_a_notice_line() -> None:
+    host = _announcement_host(
+        "All neural network modules are now loaded. System Operational.",
+        None,
+    )
     Glados.play_announcement(host)  # type: ignore[arg-type]
     item = host.tts_queue.get_nowait()
 
-    assert item == SpokenLine(host.announcement, notice=True)
+    assert item == SpokenLine(host.announcement, notice=True, ends_startup=True)
+    assert host.tts_queue.empty()
     assert host.processing_active_event.is_set()
     assert not host.startup_notice_done.is_set()
+
+
+def test_play_announcement_queues_glados_followup_after_the_notice() -> None:
+    host = _announcement_host(
+        "All neural network modules are now loaded. System Operational.",
+        "  Oh. It's you.  ",
+    )
+    Glados.play_announcement(host)  # type: ignore[arg-type]
+
+    assert host.tts_queue.get_nowait() == SpokenLine(
+        "All neural network modules are now loaded. System Operational.",
+        notice=True,
+        ends_startup=False,
+    )
+    assert host.tts_queue.get_nowait() == SpokenLine("Oh. It's you.", notice=False, ends_startup=True)
+    assert host.tts_queue.empty()
+    assert not host.startup_notice_done.is_set()
+
+
+def test_empty_announcement_followup_is_skipped() -> None:
+    host = _announcement_host("System Operational.", "   ")
+    Glados.play_announcement(host)  # type: ignore[arg-type]
+
+    assert host.tts_queue.get_nowait() == SpokenLine("System Operational.", notice=True, ends_startup=True)
+    assert host.tts_queue.empty()
 
 
 def test_wait_for_startup_notice_returns_when_the_announcement_already_finished() -> None:
@@ -395,8 +431,10 @@ def test_speak_notice_queues_announcer_line_and_ignores_blank() -> None:
     Glados.speak_notice(host, "   ")  # type: ignore[arg-type]
     assert host.tts_queue.empty()
 
+    host.announcement_followup = "Oh. It's you."
     Glados.speak_notice(host, " Chamber lockdown. ")  # type: ignore[arg-type]
-    assert host.tts_queue.get_nowait() == SpokenLine("Chamber lockdown.", notice=True)
+    assert host.tts_queue.get_nowait() == SpokenLine("Chamber lockdown.", notice=True, ends_startup=False)
+    assert host.tts_queue.empty()
 
 
 def test_config_defaults_announcer_path_to_repo_drop_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -438,25 +476,34 @@ def test_startup_line_uses_announcer_then_conversation_returns() -> None:
     )
     worker = threading.Thread(target=synthesizer.run, daemon=True)
     worker.start()
-    incoming.put(SpokenLine("All neural network modules are now loaded.", notice=True))
+    incoming.put(SpokenLine("All neural network modules are now loaded.", notice=True, ends_startup=False))
+    incoming.put(SpokenLine("Oh. It's you.", notice=False, ends_startup=True))
     incoming.put("The cake is a lie.")
 
-    messages = _collect(outgoing, 2)
+    messages = _collect(outgoing, 3)
     shutdown.set()
     worker.join(timeout=2)
 
     assert [message.text for message in messages] == [
         "All neural network modules are now loaded.",
+        "Oh. It's you.",
         "The cake is a lie.",
     ]
     assert messages[0].sample_rate == 16000
     assert messages[1].sample_rate == 22050
+    assert messages[2].sample_rate == 22050
     assert messages[0].speaker == SPEAKER_ANNOUNCER
     assert messages[1].speaker == SPEAKER_GLADOS
+    assert messages[2].speaker == SPEAKER_GLADOS
+    assert tts_dialog_role({"speaker": messages[1].speaker}) == "GLaDOS"
     assert messages[0].notice is True
     assert messages[1].notice is False
+    assert messages[2].notice is False
+    assert messages[0].ends_startup is False
+    assert messages[1].ends_startup is True
+    assert messages[2].ends_startup is False
     assert announcer.calls == ["All neural network modules are now loaded."]
-    assert conversation.calls == ["The cake is a lie."]
+    assert conversation.calls == ["Oh. It's you.", "The cake is a lie."]
 
 
 def test_notice_line_falls_back_to_conversation_voice() -> None:
@@ -686,6 +733,7 @@ def test_startup_notice_done_is_set_after_ding_off() -> None:
             text="System Operational.",
             sample_rate=16000,
             notice=True,
+            ends_startup=True,
         )
     )
     worker = threading.Thread(target=player.run, daemon=True)
@@ -696,6 +744,118 @@ def test_startup_notice_done_is_set_after_ding_off() -> None:
 
     assert flags_at_set == [[False, True, False]]
     assert audio.clips == [(44100, 2), (16000, 4), (44100, 3)]
+
+
+def test_microphone_waits_until_the_glados_followup_finishes() -> None:
+    audio = _FakeAudio()
+    done = threading.Event()
+    flags_at_set: list[list[bool]] = []
+    original_set = done.set
+
+    def _set() -> None:
+        flags_at_set.append(list(audio.interruptible_flags))
+        original_set()
+
+    done.set = _set  # type: ignore[method-assign]
+    outgoing: queue.Queue[AudioMessage] = queue.Queue()
+    shutdown = threading.Event()
+    bus = ObservabilityBus()
+    player = SpeechPlayer(
+        audio_io=audio,  # type: ignore[arg-type]
+        audio_output_queue=outgoing,
+        conversation_store=ConversationStore(),
+        tts_sample_rate=22050,
+        shutdown_event=shutdown,
+        currently_speaking_event=threading.Event(),
+        processing_active_event=threading.Event(),
+        pause_time=0.01,
+        observability_bus=bus,
+        chime_on=_chime(2, 44100),
+        chime_off=_chime(3, 44100, "models/SFX/ding_off.wav"),
+        chime_lead_s=0.0,
+        chime_tail_s=0.0,
+        chime_gap_s=0.0,
+        startup_notice_done=done,
+    )
+    outgoing.put(
+        AudioMessage(
+            audio=np.ones(4, dtype=np.float32),
+            text="System Operational.",
+            sample_rate=16000,
+            speaker=SPEAKER_ANNOUNCER,
+            notice=True,
+            ends_startup=False,
+        )
+    )
+    outgoing.put(
+        AudioMessage(
+            audio=np.ones(5, dtype=np.float32),
+            text="Oh. It's you.",
+            sample_rate=22050,
+            speaker=SPEAKER_GLADOS,
+            notice=False,
+            ends_startup=True,
+        )
+    )
+    worker = threading.Thread(target=player.run, daemon=True)
+    worker.start()
+    assert done.wait(2.0)
+    shutdown.set()
+    worker.join(timeout=2)
+
+    assert flags_at_set == [[False, True, False, True]]
+    assert audio.clips == [(44100, 2), (16000, 4), (44100, 3), (22050, 5)]
+    play_events = [event for event in bus.snapshot() if event.kind == "play"]
+    assert [tts_dialog_role(event.meta) for event in play_events] == ["Announcer", "GLaDOS"]
+
+
+def test_interrupted_notice_still_plays_the_startup_followup() -> None:
+    audio = _FakeAudio(interrupts=[False, True])
+    done = threading.Event()
+    outgoing: queue.Queue[AudioMessage] = queue.Queue()
+    shutdown = threading.Event()
+    player = SpeechPlayer(
+        audio_io=audio,  # type: ignore[arg-type]
+        audio_output_queue=outgoing,
+        conversation_store=ConversationStore(),
+        tts_sample_rate=22050,
+        shutdown_event=shutdown,
+        currently_speaking_event=threading.Event(),
+        processing_active_event=threading.Event(),
+        pause_time=0.01,
+        chime_on=_chime(2, 44100),
+        chime_off=_chime(3, 44100, "models/SFX/ding_off.wav"),
+        chime_lead_s=0.0,
+        chime_tail_s=0.0,
+        chime_gap_s=0.0,
+        startup_notice_done=done,
+    )
+    outgoing.put(
+        AudioMessage(
+            audio=np.ones(4, dtype=np.float32),
+            text="System Operational.",
+            sample_rate=16000,
+            speaker=SPEAKER_ANNOUNCER,
+            notice=True,
+        )
+    )
+    outgoing.put(
+        AudioMessage(
+            audio=np.ones(5, dtype=np.float32),
+            text="Oh. It's you.",
+            sample_rate=22050,
+            speaker=SPEAKER_GLADOS,
+            ends_startup=True,
+        )
+    )
+    worker = threading.Thread(target=player.run, daemon=True)
+    worker.start()
+    assert done.wait(2.0)
+    shutdown.set()
+    worker.join(timeout=2)
+
+    assert audio.clips == [(44100, 2), (16000, 4), (44100, 3), (22050, 5)]
+    assert audio.interruptible_flags == [False, True, False, True]
 
 
 def test_conversation_line_does_not_finish_the_startup_notice() -> None:

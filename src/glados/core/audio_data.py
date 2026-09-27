@@ -29,6 +29,9 @@ class AudioMessage:
             A missing Announcer model keeps ``GLaDOS``.
         notice: True for startup and ``speak_notice`` lines. PA chimes follow
             this flag even when the voice falls back to GLaDOS.
+        ends_startup: True on the last startup line. Playback sets the
+            microphone-open event only after this clip, including a GLaDOS
+            follow-up that has no chimes.
     """
 
     audio: NDArray[np.float32]
@@ -37,6 +40,7 @@ class AudioMessage:
     sample_rate: int | None = None
     speaker: str = SPEAKER_GLADOS
     notice: bool = False
+    ends_startup: bool = False
 
 
 def tts_dialog_role(meta: dict[str, Any] | None) -> str:

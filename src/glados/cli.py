@@ -223,7 +223,7 @@ def log_cli_start(config: GladosConfig, config_path: str | Path | list[str] | li
         f"{describe_configured_chime('on', config.notice_chime_on, 'GLADOS_NOTICE_CHIME_ON')} "
         f"{describe_configured_chime('off', config.notice_chime_off, 'GLADOS_NOTICE_CHIME_OFF')} "
         f"asr_muted={config.asr_muted} tts_enabled={config.tts_enabled} "
-        f"announcement={config.announcement!r}"
+        f"announcement={config.announcement!r} announcement_followup={config.announcement_followup!r}"
     )
 
 
