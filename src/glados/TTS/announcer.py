@@ -61,5 +61,5 @@ def try_load_announcer_voice(model_path: str | None) -> SpeechSynthesizer | None
         )
         return None
 
-    logger.info(f"Announcer voice loaded from {onnx_path}")
+    logger.success(f"Announcer voice loaded from {onnx_path}")
     return voice

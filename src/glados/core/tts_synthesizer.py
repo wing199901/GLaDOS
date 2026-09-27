@@ -56,7 +56,12 @@ class TextToSpeechSynthesizer:
         logger.info("TextToSpeechSynthesizer thread started.")
         while not self.shutdown_event.is_set():
             try:
-                text_to_speak, use_notice = self._read_queue_item(self.tts_input_queue.get(timeout=self.pause_time))
+                queued = self.tts_input_queue.get(timeout=self.pause_time)
+                text_to_speak, use_notice = self._read_queue_item(queued)
+                logger.success(
+                    "TTS dequeued: "
+                    f"type={type(queued).__name__} notice={use_notice} text={text_to_speak!r}"
+                )
 
                 if text_to_speak == "<EOS>":
                     logger.debug("TTS Synthesizer: Received EOS token.")
@@ -102,13 +107,19 @@ class TextToSpeechSynthesizer:
                         )
 
                     # Even if audio_data is empty, send the message so AudioPlayer can log/handle it
+                    speaker = SPEAKER_ANNOUNCER if voice is self.notice_model else SPEAKER_GLADOS
+                    logger.success(
+                        "TTS produced AudioMessage: "
+                        f"notice={use_notice} speaker={speaker} shape={getattr(audio_data, 'shape', None)} "
+                        f"sr={voice.sample_rate} text={spoken_text_variant!r}"
+                    )
                     self.audio_output_queue.put(
                         AudioMessage(
                             audio=audio_data,
                             text=spoken_text_variant,
                             is_eos=False,
                             sample_rate=voice.sample_rate,
-                            speaker=SPEAKER_ANNOUNCER if voice is self.notice_model else SPEAKER_GLADOS,
+                            speaker=speaker,
                             notice=use_notice,
                         )
                     )

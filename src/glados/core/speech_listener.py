@@ -58,6 +58,7 @@ class SpeechListener:
         asr_muted_event: threading.Event | None = None,
         audio_state: AudioState | None = None,
         on_interrupt: InterruptCallback | None = None,
+        chime_hold_event: threading.Event | None = None,
     ) -> None:
         """
         Initializes the SpeechListener with audio I/O, inter-thread communication, and ASR model.
@@ -96,6 +97,7 @@ class SpeechListener:
         self._asr_muted_event = asr_muted_event
         self._audio_state = audio_state
         self._on_interrupt = on_interrupt
+        self._chime_hold_event = chime_hold_event
 
     def run(self) -> None:
         """
@@ -178,6 +180,11 @@ class SpeechListener:
             sample: The current audio sample (numpy array) to be added to the buffer.
             vad_confidence: True if voice activity is detected in the sample, False otherwise.
         """
+        # Notice chimes are short and loud enough to trip VAD. While one is
+        # playing, do not stop playback or start a user recording.
+        if self._chime_hold_event is not None and self._chime_hold_event.is_set():
+            return
+
         self._buffer.append(sample)  # Automatically handles overflow
 
         if vad_confidence:
