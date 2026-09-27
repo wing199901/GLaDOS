@@ -14,6 +14,42 @@ from .base import AudioIO
 from .resample import resample as resample_audio
 
 
+def fill_output_buffer(
+    audio: NDArray[np.float32],
+    position: int,
+    frames: int,
+    *,
+    stop_requested: bool,
+    interruptible: bool,
+) -> tuple[NDArray[np.float32], int, bool, bool]:
+    """Fill one speaker block.
+
+    Returns ``(block, new_position, stop_stream, interrupted)``.
+
+    The block that finishes the clip does not stop the stream. The next
+    block is silence and then stops. ``sounddevice.play()`` works the same
+    way: it returns from the callback that wrote the last samples, and only
+    the following callback stops the stream.
+
+    Raising CallbackStop in the same callback that wrote a ~0.2s ding drops
+    that buffer on Windows before the speakers play it. A multi-second
+    announcement still sounds normal because only its tail buffer is lost.
+    A direct ``sd.play`` of the same wav is audible because it does not stop
+    in that callback.
+    """
+    block = np.zeros(frames, dtype=np.float32)
+    if frames <= 0:
+        return block, position, True, False
+    if stop_requested and interruptible:
+        return block, position, True, True
+    remaining = len(audio) - position
+    if remaining <= 0:
+        return block, position, True, False
+    chunk = min(frames, remaining)
+    block[:chunk] = audio[position : position + chunk]
+    return block, position + chunk, False, False
+
+
 class SoundDeviceAudioIO(AudioIO):
     """Audio I/O implementation using sounddevice for both input and output.
 
@@ -233,36 +269,30 @@ class SoundDeviceAudioIO(AudioIO):
             """Fill the next output block and track completion or interruption."""
             nonlocal position, interrupted
 
-            if stop_event.is_set() and self._playback_interruptible:
-                outdata.fill(0)
+            block, position, stop_stream, was_interrupted = fill_output_buffer(
+                audio_data,
+                position,
+                frames,
+                stop_requested=stop_event.is_set(),
+                interruptible=self._playback_interruptible,
+            )
+            outdata[:, 0] = block
+            if was_interrupted:
                 interrupted = True
+            if stop_stream:
                 completion_event.set()
                 raise sd.CallbackStop
 
-            remaining = effective_total - position
-            chunk_size = min(frames, remaining)
-
-            if chunk_size > 0:
-                outdata[:chunk_size, 0] = audio_data[position : position + chunk_size]
-                if chunk_size < frames:
-                    outdata[chunk_size:].fill(0)
-                position += chunk_size
-            else:
-                outdata.fill(0)
-
-            if position >= effective_total:
-                completion_event.set()
-                raise sd.CallbackStop
-
+        chime = not self._playback_interruptible
         try:
             logger.debug(f"Using sample rate: {sample_rate} Hz, total samples: {effective_total}")
             max_timeout = effective_total / sample_rate + 1
             playback_finished = threading.Event()
-            # PA chimes are a few tenths of a second. The stream callback reports
-            # "done" when the last samples are queued, which is before the device
-            # has played them. Wait for PortAudio's finished callback, and keep
-            # the stream open, so closing it does not discard the ding.
-            short_clip = effective_total / sample_rate <= 0.5
+            if chime:
+                logger.success(
+                    f"PLAYING notice chime on output device: {effective_total} samples, "
+                    f"{sample_rate} Hz, {effective_total / sample_rate:.2f}s"
+                )
 
             def _playback_finished() -> None:
                 playback_finished.set()
@@ -271,25 +301,35 @@ class SoundDeviceAudioIO(AudioIO):
                 callback=stream_callback,
                 samplerate=sample_rate,
                 channels=1,
+                dtype="float32",
                 finished_callback=_playback_finished,
-            ):
+            ) as stream:
                 completed = completion_event.wait(max_timeout)
                 if not completed:
                     # Timeout: signal stop and mark as interrupted
                     stop_event.set()
                     interrupted = True
                     logger.debug("Audio playback timed out, forcing interruption")
-                if short_clip:
-                    # Stay open long enough for the device to play the queued samples
-                    # even if the finished callback is late. This is the PA-chime case.
-                    drain_timeout = effective_total / sample_rate + 0.25
-                    if not playback_finished.wait(drain_timeout):
-                        logger.warning("Short clip was queued but the device did not report playback finished.")
-                    elif not interrupted:
-                        time.sleep(0.05)
+                if chime:
+                    # Keep the stream open for the device latency. finished_callback
+                    # can fire when the callback stops, which is before a short ding
+                    # has come out of the speakers. Closing then discards it.
+                    try:
+                        latency = float(stream.latency)
+                    except (TypeError, ValueError):
+                        latency = 0.2
+                    hold_s = min(0.4, max(0.12, latency))
+                    playback_finished.wait(hold_s)
+                    time.sleep(hold_s)
+                    logger.success(
+                        f"PLAYED notice chime on output device: {sample_rate} Hz, interrupted={interrupted}"
+                    )
 
-        except (sd.PortAudioError, RuntimeError):
-            logger.debug("Audio stream already closed or invalid")
+        except (sd.PortAudioError, RuntimeError) as exc:
+            if chime:
+                logger.error(f"Notice chime output stream failed: {exc}")
+            else:
+                logger.debug(f"Audio stream already closed or invalid: {exc}")
 
         # Identity-checked teardown: only clear shared state if it still belongs to this
         # session, otherwise a new start_speaking() that ran concurrently could be wiped out.

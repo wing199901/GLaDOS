@@ -16,6 +16,7 @@ from numpy.typing import NDArray
 import pytest
 import soundfile as sf
 
+from glados.audio_io.sounddevice_io import fill_output_buffer
 from glados.core.audio_data import SPEAKER_ANNOUNCER, SPEAKER_GLADOS, AudioMessage, tts_dialog_role
 from glados.core.conversation_store import ConversationStore
 from glados.core.engine import Glados, GladosConfig
@@ -697,6 +698,42 @@ def test_config_notice_chime_defaults_and_env(tmp_path: Path, monkeypatch: pytes
     assert loaded.notice_chime_off_after_interrupt is True
 
 
+def test_short_clip_is_not_stopped_in_the_buffer_that_contains_it() -> None:
+    """The ding must be committed before CallbackStop, matching sounddevice.play."""
+    ding = np.linspace(0.1, 0.9, 10, dtype=np.float32)
+
+    first, position, stop, interrupted = fill_output_buffer(
+        ding, 0, 32, stop_requested=False, interruptible=False
+    )
+    assert stop is False
+    assert interrupted is False
+    assert position == 10
+    np.testing.assert_array_equal(first[:10], ding)
+    assert np.all(first[10:] == 0)
+
+    second, position, stop, interrupted = fill_output_buffer(
+        ding, position, 32, stop_requested=False, interruptible=False
+    )
+    assert stop is True
+    assert interrupted is False
+    assert position == 10
+    assert np.all(second == 0)
+
+    stopped, _, stop, interrupted = fill_output_buffer(
+        ding, 0, 32, stop_requested=True, interruptible=False
+    )
+    assert stop is False
+    assert interrupted is False
+    np.testing.assert_array_equal(stopped[:10], ding)
+
+    silenced, _, stop, interrupted = fill_output_buffer(
+        ding, 0, 32, stop_requested=True, interruptible=True
+    )
+    assert stop is True
+    assert interrupted is True
+    assert np.all(silenced == 0)
+
+
 def test_chime_edges_keep_the_ding_away_from_the_buffer_ends() -> None:
     clip = NoticeChime(audio=np.ones(10, dtype=np.float32), sample_rate=100, source="ding_on.wav")
     edged = with_chime_edges(clip, lead_s=0.02, tail_s=0.05)
@@ -739,10 +776,10 @@ def test_notice_chime_logs_and_holds_the_mic(monkeypatch: pytest.MonkeyPatch) ->
     assert slept == [0.1]
     assert audio.hold_during_start == [True, False, True]
     assert audio.interruptible_flags == [False, True, False]
-    started = "Notice chime started (ding_on) from models/SFX/ding_on.wav: 44100 Hz, 2 samples, 0.00s."
+    started = "PLAYING notice chime ding_on from models/SFX/ding_on.wav: 44100 Hz, 2 samples, 0.00s"
     assert started in messages
-    assert any(text.startswith("Notice chime finished (ding_on)") for text in messages)
-    assert any(text.startswith("Notice chime finished (ding_off)") for text in messages)
+    assert "PLAYED notice chime ding_on from models/SFX/ding_on.wav" in messages
+    assert "PLAYED notice chime ding_off from models/SFX/ding_off.wav" in messages
     assert not hold.is_set()
 
 

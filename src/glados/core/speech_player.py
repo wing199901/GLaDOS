@@ -242,8 +242,8 @@ class SpeechPlayer:
         playback = with_chime_edges(clip, self._chime_lead_s, self._chime_tail_s)
         seconds = len(clip.audio) / clip.sample_rate if clip.sample_rate else 0.0
         logger.success(
-            f"Notice chime started ({label}) from {clip.source}: "
-            f"{clip.sample_rate} Hz, {len(clip.audio)} samples, {seconds:.2f}s."
+            f"PLAYING notice chime {label} from {clip.source}: "
+            f"{clip.sample_rate} Hz, {len(clip.audio)} samples, {seconds:.2f}s"
         )
         try:
             self.audio_io.start_speaking(playback.audio, playback.sample_rate, interruptible=False)
@@ -259,7 +259,7 @@ class SpeechPlayer:
                 f"Notice chime cut short ({label}) from {clip.source} at {percentage}%. Continuing the notice."
             )
         else:
-            logger.success(f"Notice chime finished ({label}) from {clip.source}.")
+            logger.success(f"PLAYED notice chime {label} from {clip.source}")
 
     def _hold_chime(self) -> None:
         """Keep the mic from treating this chime as the user talking."""
