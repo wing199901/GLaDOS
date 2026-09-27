@@ -7,12 +7,11 @@ falls back to that conversation voice.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from loguru import logger
 
-from ..utils.resources import resource_path
+from ..utils.resources import resolve_repo_path
 from .piper_config import piper_config_candidates
 from .tts_glados import SpeechSynthesizer
 
@@ -22,17 +21,8 @@ DEFAULT_ANNOUNCER_MODEL = "models/TTS/announcer.onnx"
 
 
 def resolve_announcer_model_path(model_path: str) -> Path:
-    """Resolve an Announcer ONNX path the same way other repo models are resolved.
-
-    Relative paths, including the default ``models/TTS/announcer.onnx``, are
-    rooted at the project directory via :func:`resource_path`. An absolute path
-    is left as-is so ``GLADOS_ANNOUNCER_MODEL`` can still point elsewhere.
-    """
-    expanded = os.path.expandvars(os.path.expanduser(model_path.strip()))
-    path = Path(expanded)
-    if path.is_absolute():
-        return path
-    return resource_path(expanded)
+    """Resolve an Announcer ONNX path the same way other repo models are resolved."""
+    return resolve_repo_path(model_path)
 
 
 def try_load_announcer_voice(model_path: str | None) -> SpeechSynthesizer | None:

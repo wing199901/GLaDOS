@@ -35,6 +35,7 @@ from ..observability import MindRegistry, ObservabilityBus, trim_message
 from ..vision import VisionConfig, VisionState
 from ..vision.constants import SYSTEM_PROMPT_VISION_HANDLING
 from .audio_data import AudioMessage
+from .notice_chimes import DEFAULT_NOTICE_CHIME_OFF, DEFAULT_NOTICE_CHIME_ON, NoticeChime, load_notice_chime
 from .context import ContextBuilder
 from .audio_state import AudioState
 from .conversation_store import ConversationStore
@@ -120,6 +121,11 @@ class GladosConfig(BaseModel):
     # Relative repo path, same idea as models/TTS/glados.onnx. The ONNX and sidecar
     # are a local drop-in; a missing file keeps notice lines on `voice`.
     announcer_model_path: str | None = DEFAULT_ANNOUNCER_MODEL
+    # Local PA chimes around notice lines (startup announcement and speak_notice).
+    # Copy ding_on.wav and ding_off.wav into models/SFX/. Missing files are skipped.
+    # Do not commit those wavs. Conversation lines never play them.
+    notice_chime_on: str | None = DEFAULT_NOTICE_CHIME_ON
+    notice_chime_off: str | None = DEFAULT_NOTICE_CHIME_OFF
     announcement: str | None
     llm_headers: dict[str, str] | None = None
     tui_theme: str | None = None
@@ -150,6 +156,22 @@ class GladosConfig(BaseModel):
         if env_path is not None:
             stripped = env_path.strip()
             self.announcer_model_path = stripped or None
+        return self
+
+    @model_validator(mode="after")
+    def _apply_notice_chime_env(self) -> "GladosConfig":
+        """Let GLADOS_NOTICE_CHIME_ON and GLADOS_NOTICE_CHIME_OFF override the YAML paths.
+
+        An empty value disables that chime. Unset variables leave the config path in place.
+        """
+        for env_name, field_name in (
+            ("GLADOS_NOTICE_CHIME_ON", "notice_chime_on"),
+            ("GLADOS_NOTICE_CHIME_OFF", "notice_chime_off"),
+        ):
+            env_path = os.environ.get(env_name)
+            if env_path is not None:
+                stripped = env_path.strip()
+                setattr(self, field_name, stripped or None)
         return self
 
     @classmethod
@@ -262,6 +284,8 @@ class Glados:
         asr_muted: bool = False,
         llm_headers: dict[str, str] | None = None,
         notice_tts_model: SpeechSynthesizerProtocol | None = None,
+        notice_chime_on: NoticeChime | None = None,
+        notice_chime_off: NoticeChime | None = None,
     ) -> None:
         """
         Initialize the Glados voice assistant with configuration parameters.
@@ -277,6 +301,8 @@ class Glados:
             audio_io (AudioProtocol): The audio input/output system to use.
             notice_tts_model: Optional second Piper model for the startup announcement and
                 other short notice lines. Missing means those lines use ``tts_model``.
+            notice_chime_on: Optional ding played before a notice line. Missing skips it.
+            notice_chime_off: Optional ding played after a notice line finishes. Missing skips it.
             completion_url (HttpUrl): The URL for the LLM completion endpoint.
             llm_model (str): The name of the LLM model to use.
             api_key (str | None): API key for accessing the LLM service, if required.
@@ -296,6 +322,8 @@ class Glados:
         self._asr_model = asr_model
         self._tts = tts_model
         self._notice_tts = notice_tts_model
+        self._notice_chime_on = notice_chime_on
+        self._notice_chime_off = notice_chime_off
         self.input_mode = input_mode
         self.completion_url = completion_url
         self.llm_model = llm_model
@@ -553,6 +581,8 @@ class Glados:
             tts_muted_event=self.tts_muted_event,
             interaction_state=self.interaction_state,
             observability_bus=self.observability_bus,
+            chime_on=self._notice_chime_on,
+            chime_off=self._notice_chime_off,
         )
 
         self.vision_processor = None
@@ -885,6 +915,8 @@ class Glados:
         )
 
         tts_model, notice_tts_model = cls._build_tts_models(config)
+        notice_chime_on = load_notice_chime(config.notice_chime_on)
+        notice_chime_off = load_notice_chime(config.notice_chime_off)
 
         audio_io = get_audio_system(
             backend_type=config.audio_io,
@@ -896,6 +928,8 @@ class Glados:
                 asr_model=asr_model,
                 tts_model=tts_model,
                 notice_tts_model=notice_tts_model,
+                notice_chime_on=notice_chime_on,
+                notice_chime_off=notice_chime_off,
                 audio_io=audio_io,
                 completion_url=config.completion_url,
                 llm_model=config.llm_model,

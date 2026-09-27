@@ -13,13 +13,21 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 import pytest
+import soundfile as sf
 
-from glados.core.audio_data import AudioMessage
+from glados.core.audio_data import SPEAKER_ANNOUNCER, SPEAKER_GLADOS, AudioMessage, tts_dialog_role
 from glados.core.conversation_store import ConversationStore
 from glados.core.engine import Glados, GladosConfig
+from glados.core.notice_chimes import (
+    DEFAULT_NOTICE_CHIME_OFF,
+    DEFAULT_NOTICE_CHIME_ON,
+    NoticeChime,
+    load_notice_chime,
+)
 from glados.core.speech_player import SpeechPlayer
 from glados.core.spoken_line import SpokenLine
 from glados.core.tts_synthesizer import TextToSpeechSynthesizer
+from glados.observability import ObservabilityBus
 from glados.TTS.announcer import DEFAULT_ANNOUNCER_MODEL, resolve_announcer_model_path, try_load_announcer_voice
 from glados.TTS.piper_config import piper_config_candidates, resolve_piper_config_path
 from glados.TTS.tts_glados import SpeechSynthesizer
@@ -43,8 +51,10 @@ class _IdentityConverter:
 
 
 class _FakeAudio:
-    def __init__(self) -> None:
+    def __init__(self, interrupts: list[bool] | None = None) -> None:
         self.played: list[tuple[int | None, str]] = []
+        self.clips: list[tuple[int | None, int]] = []
+        self._interrupts = list(interrupts or [])
 
     def start_speaking(
         self,
@@ -53,9 +63,11 @@ class _FakeAudio:
         text: str = "",
     ) -> None:
         self.played.append((sample_rate, text))
+        self.clips.append((sample_rate, len(audio_data)))
 
     def measure_percentage_spoken(self, total_samples: int, sample_rate: int | None = None) -> tuple[bool, int]:
-        return False, 100
+        interrupted = self._interrupts.pop(0) if self._interrupts else False
+        return interrupted, 0 if interrupted else 100
 
 
 def _minimal_glados_yaml(announcer_line: str | None) -> str:
@@ -238,11 +250,15 @@ def test_shipped_config_uses_in_repo_announcer_path(monkeypatch: pytest.MonkeyPa
     assert loaded.announcer_model_path == DEFAULT_ANNOUNCER_MODEL
     assert loaded.announcer_model_path is not None
     assert not Path(loaded.announcer_model_path).is_absolute()
+    assert loaded.notice_chime_on == DEFAULT_NOTICE_CHIME_ON
+    assert loaded.notice_chime_off == DEFAULT_NOTICE_CHIME_OFF
+    assert loaded.notice_chime_on is not None
+    assert not Path(loaded.notice_chime_on).is_absolute()
 
 
 def test_relative_announcer_path_resolves_from_package_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     model = _write_piper_pair(tmp_path / "models" / "TTS")
-    monkeypatch.setattr("glados.TTS.announcer.resource_path", lambda relative: tmp_path / relative)
+    monkeypatch.setattr("glados.utils.resources.resource_path", lambda relative: tmp_path / relative)
     captured: dict[str, Path] = {}
 
     def _capture(model_path: Path, *_args: object, **_kwargs: object) -> str:
@@ -354,6 +370,10 @@ def test_startup_line_uses_announcer_then_conversation_returns() -> None:
     ]
     assert messages[0].sample_rate == 16000
     assert messages[1].sample_rate == 22050
+    assert messages[0].speaker == SPEAKER_ANNOUNCER
+    assert messages[1].speaker == SPEAKER_GLADOS
+    assert messages[0].notice is True
+    assert messages[1].notice is False
     assert announcer.calls == ["All neural network modules are now loaded."]
     assert conversation.calls == ["The cake is a lie."]
 
@@ -382,6 +402,8 @@ def test_notice_line_falls_back_to_conversation_voice() -> None:
 
     assert len(messages) == 1
     assert messages[0].sample_rate == 22050
+    assert messages[0].speaker == SPEAKER_GLADOS
+    assert messages[0].notice is True
     assert conversation.calls == ["System Operational."]
 
 
@@ -418,3 +440,208 @@ def test_player_uses_line_sample_rate() -> None:
     worker.join(timeout=2)
 
     assert audio.played == [(16000, "")]
+
+
+def test_play_event_labels_announcer_and_fallback_stays_glados() -> None:
+    assert tts_dialog_role({"speaker": SPEAKER_ANNOUNCER}) == "Announcer"
+    assert tts_dialog_role({"speaker": SPEAKER_GLADOS}) == "GLaDOS"
+    assert tts_dialog_role({}) == "GLaDOS"
+    assert tts_dialog_role(None) == "GLaDOS"
+
+    audio = _FakeAudio()
+    outgoing: queue.Queue[AudioMessage] = queue.Queue()
+    shutdown = threading.Event()
+    bus = ObservabilityBus()
+    player = SpeechPlayer(
+        audio_io=audio,  # type: ignore[arg-type]
+        audio_output_queue=outgoing,
+        conversation_store=ConversationStore(),
+        tts_sample_rate=22050,
+        shutdown_event=shutdown,
+        currently_speaking_event=threading.Event(),
+        processing_active_event=threading.Event(),
+        pause_time=0.01,
+        observability_bus=bus,
+    )
+    worker = threading.Thread(target=player.run, daemon=True)
+    worker.start()
+    outgoing.put(
+        AudioMessage(
+            audio=np.ones(4, dtype=np.float32),
+            text="All neural network modules are now loaded.",
+            speaker=SPEAKER_ANNOUNCER,
+        )
+    )
+    outgoing.put(AudioMessage(audio=np.ones(4, dtype=np.float32), text="The cake is a lie."))
+
+    deadline = time.time() + 2.0
+    play_events = []
+    while time.time() < deadline:
+        play_events = [event for event in bus.snapshot() if event.kind == "play"]
+        if len(play_events) >= 2:
+            break
+        time.sleep(0.01)
+    shutdown.set()
+    worker.join(timeout=2)
+
+    assert [tts_dialog_role(event.meta) for event in play_events] == ["Announcer", "GLaDOS"]
+    assert [event.message for event in play_events] == [
+        "All neural network modules are now loaded.",
+        "The cake is a lie.",
+    ]
+
+
+def _chime(length: int, sample_rate: int) -> NoticeChime:
+    return NoticeChime(audio=np.ones(length, dtype=np.float32), sample_rate=sample_rate)
+
+
+def _play_one(
+    message: AudioMessage,
+    *,
+    chime_on: NoticeChime | None = None,
+    chime_off: NoticeChime | None = None,
+    interrupts: list[bool] | None = None,
+    extra: list[AudioMessage] | None = None,
+) -> tuple[_FakeAudio, queue.Queue[AudioMessage]]:
+    audio = _FakeAudio(interrupts)
+    outgoing: queue.Queue[AudioMessage] = queue.Queue()
+    shutdown = threading.Event()
+    player = SpeechPlayer(
+        audio_io=audio,  # type: ignore[arg-type]
+        audio_output_queue=outgoing,
+        conversation_store=ConversationStore(),
+        tts_sample_rate=22050,
+        shutdown_event=shutdown,
+        currently_speaking_event=threading.Event(),
+        processing_active_event=threading.Event(),
+        pause_time=0.01,
+        chime_on=chime_on,
+        chime_off=chime_off,
+    )
+    outgoing.put(message)
+    for item in extra or []:
+        outgoing.put(item)
+    worker = threading.Thread(target=player.run, daemon=True)
+    worker.start()
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline and len(audio.clips) < 1:
+        time.sleep(0.01)
+    shutdown.set()
+    worker.join(timeout=2)
+    return audio, outgoing
+
+
+def test_notice_line_plays_chime_speech_chime() -> None:
+    chime_on = _chime(2, 44100)
+    chime_off = _chime(3, 44100)
+    audio, _outgoing = _play_one(
+        AudioMessage(
+            audio=np.ones(4, dtype=np.float32),
+            text="System Operational.",
+            sample_rate=16000,
+            notice=True,
+        ),
+        chime_on=chime_on,
+        chime_off=chime_off,
+    )
+
+    assert audio.clips == [(44100, 2), (16000, 4), (44100, 3)]
+
+
+def test_conversation_line_skips_chimes() -> None:
+    audio, _outgoing = _play_one(
+        AudioMessage(audio=np.ones(4, dtype=np.float32), text="The cake is a lie.", sample_rate=22050),
+        chime_on=_chime(2, 44100),
+        chime_off=_chime(3, 44100),
+    )
+
+    assert audio.clips == [(22050, 4)]
+    assert audio.played == [(22050, "")]
+
+
+def test_missing_chimes_still_speak_the_notice() -> None:
+    audio, _outgoing = _play_one(
+        AudioMessage(
+            audio=np.ones(4, dtype=np.float32),
+            text="System Operational.",
+            sample_rate=16000,
+            notice=True,
+        )
+    )
+
+    assert audio.clips == [(16000, 4)]
+
+
+def test_interrupt_during_ding_on_skips_speech_and_ding_off() -> None:
+    pending = AudioMessage(audio=np.ones(4, dtype=np.float32), text="still queued")
+    audio, outgoing = _play_one(
+        AudioMessage(
+            audio=np.ones(8, dtype=np.float32),
+            text="System Operational.",
+            sample_rate=16000,
+            notice=True,
+        ),
+        chime_on=_chime(2, 44100),
+        chime_off=_chime(3, 44100),
+        interrupts=[True],
+        extra=[pending],
+    )
+
+    assert audio.clips == [(44100, 2)]
+    assert outgoing.empty()
+
+
+def test_interrupt_during_speech_skips_ding_off() -> None:
+    audio, _outgoing = _play_one(
+        AudioMessage(
+            audio=np.ones(8, dtype=np.float32),
+            text="System Operational.",
+            sample_rate=16000,
+            notice=True,
+        ),
+        chime_on=_chime(2, 44100),
+        chime_off=_chime(3, 44100),
+        interrupts=[False, True],
+    )
+
+    assert audio.clips == [(44100, 2), (16000, 8)]
+
+
+def test_load_notice_chime_downmixes_stereo_and_skips_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("glados.utils.resources.resource_path", lambda relative: tmp_path / relative)
+
+    assert load_notice_chime(None) is None
+    assert load_notice_chime("  ") is None
+    assert load_notice_chime("models/SFX/ding_on.wav") is None
+
+    stereo = np.array([[0.0, 1.0], [1.0, 0.0], [0.5, 0.5]], dtype=np.float32)
+    wav_path = tmp_path / "models" / "SFX" / "ding_on.wav"
+    wav_path.parent.mkdir(parents=True)
+    sf.write(str(wav_path), stereo, 44100, subtype="FLOAT")
+
+    clip = load_notice_chime("models/SFX/ding_on.wav")
+
+    assert clip is not None
+    assert clip.sample_rate == 44100
+    assert clip.audio.shape == (3,)
+    np.testing.assert_allclose(clip.audio, np.array([0.5, 0.5, 0.5], dtype=np.float32))
+
+
+def test_config_notice_chime_defaults_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    text = _minimal_glados_yaml(None).replace("  announcer_model_path: null\n", "")
+    config_file = tmp_path / "glados_config.yaml"
+    config_file.write_text(text, encoding="utf-8")
+    monkeypatch.delenv("GLADOS_ANNOUNCER_MODEL", raising=False)
+    monkeypatch.delenv("GLADOS_NOTICE_CHIME_ON", raising=False)
+    monkeypatch.delenv("GLADOS_NOTICE_CHIME_OFF", raising=False)
+
+    loaded = GladosConfig.from_yaml(config_file)
+    assert loaded.notice_chime_on == DEFAULT_NOTICE_CHIME_ON
+    assert loaded.notice_chime_off == DEFAULT_NOTICE_CHIME_OFF
+
+    monkeypatch.setenv("GLADOS_NOTICE_CHIME_ON", "  ")
+    monkeypatch.setenv("GLADOS_NOTICE_CHIME_OFF", "models/SFX/custom_off.wav")
+    overridden = GladosConfig.from_yaml(config_file)
+    assert overridden.notice_chime_on is None
+    assert overridden.notice_chime_off == "models/SFX/custom_off.wav"

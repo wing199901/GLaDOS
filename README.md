@@ -479,7 +479,25 @@ announcer_model_path: "models/TTS/announcer.onnx"
 
 `GLADOS_ANNOUNCER_MODEL` optionally overrides that path. Set it to empty to force the conversation voice even if the drop-in is present.
 
-If the ONNX, the sidecar, or the model session is missing, startup still speaks. That line uses the conversation voice and the process does not crash.
+If the ONNX, the sidecar, or the model session is missing, startup still speaks. That line uses the conversation voice and the process does not crash. The TUI dialog labels the line **Announcer** only when that model actually synthesized it. Fallback playback stays labeled **GLaDOS**, as do later replies.
+
+Notice lines can also play a short PA chime before the speech and another after it finishes: `ding_on`, then the line, then `ding_off`. That bracket is for `play_announcement` and `speak_notice` only. LLM replies and the `speak` tool do not get chimes. The chimes still play when the Announcer model is missing and the line falls back to the GLaDOS voice; the TUI label stays **GLaDOS** in that case. Muted TTS skips the chimes along with the speech.
+
+Copy your own wavs into the checkout. These files are personal local playback only. Do not commit Valve audio. The names are gitignored:
+
+```text
+models/SFX/ding_on.wav
+models/SFX/ding_off.wav
+```
+
+The default config already points at those relative paths:
+
+```yaml
+notice_chime_on: "models/SFX/ding_on.wav"
+notice_chime_off: "models/SFX/ding_off.wav"
+```
+
+`GLADOS_NOTICE_CHIME_ON` and `GLADOS_NOTICE_CHIME_OFF` optionally override each path. Set either to empty to skip that chime. A missing or unreadable wav is skipped and startup still speaks.
 
 ### Custom Personality
 

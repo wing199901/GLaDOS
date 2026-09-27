@@ -21,6 +21,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Footer, Header, Input, Label, OptionList, RichLog, Static
 from textual.worker import Worker, WorkerState
 
+from glados.core.audio_data import tts_dialog_role
 from glados.core.engine import Glados, GladosConfig
 from glados.glados_ui.text_resources import shortcuts_text, welcome_tips
 from glados.observability import ObservabilityEvent
@@ -298,7 +299,7 @@ class DialogLog(RichLog):
         if event.kind == "user_input" and event.source in {"asr", "text"}:
             return DialogLine(role="You", content=event.message)
         if event.source == "tts" and event.kind == "play":
-            return DialogLine(role="GLaDOS", content=event.message)
+            return DialogLine(role=tts_dialog_role(event.meta), content=event.message)
         return None
 
     def _write_dialog(self, line: DialogLine) -> None:
@@ -640,7 +641,7 @@ class MessagesScreen(ModalScreen[None]):
                     lines.append(f"[{timestamp}] You: {event.message}")
                 elif event.source == "tts" and event.kind == "play":
                     timestamp = datetime.fromtimestamp(event.timestamp).strftime("%H:%M:%S")
-                    lines.append(f"[{timestamp}] GLaDOS: {event.message}")
+                    lines.append(f"[{timestamp}] {tts_dialog_role(event.meta)}: {event.message}")
             content = "\n".join(lines) if lines else "No dialog yet."
         self.query_one("#messages_text", Static).update(content)
 
