@@ -57,11 +57,12 @@ class TextToSpeechSynthesizer:
         while not self.shutdown_event.is_set():
             try:
                 queued = self.tts_input_queue.get(timeout=self.pause_time)
-                text_to_speak, use_notice, ends_startup = self._read_queue_item(queued)
+                text_to_speak, use_notice, ends_startup, playback_delay_s = self._read_queue_item(queued)
                 logger.success(
                     "TTS dequeued: "
                     f"type={type(queued).__name__} notice={use_notice} "
-                    f"ends_startup={ends_startup} text={text_to_speak!r}"
+                    f"ends_startup={ends_startup} playback_delay_s={playback_delay_s} "
+                    f"text={text_to_speak!r}"
                 )
 
                 if text_to_speak == "<EOS>":
@@ -112,6 +113,7 @@ class TextToSpeechSynthesizer:
                     logger.success(
                         "TTS produced AudioMessage: "
                         f"notice={use_notice} speaker={speaker} ends_startup={ends_startup} "
+                        f"playback_delay_s={playback_delay_s} "
                         f"shape={getattr(audio_data, 'shape', None)} "
                         f"sr={voice.sample_rate} text={spoken_text_variant!r}"
                     )
@@ -124,6 +126,7 @@ class TextToSpeechSynthesizer:
                             speaker=speaker,
                             notice=use_notice,
                             ends_startup=ends_startup,
+                            playback_delay_s=playback_delay_s,
                         )
                     )
             except queue.Empty:
@@ -136,11 +139,11 @@ class TextToSpeechSynthesizer:
         logger.info("TextToSpeechSynthesizer thread finished.")
 
     @staticmethod
-    def _read_queue_item(item: TtsQueueItem) -> tuple[str, bool, bool]:
-        """Return text, the notice-voice flag, and whether this line ends startup."""
+    def _read_queue_item(item: TtsQueueItem) -> tuple[str, bool, bool, float]:
+        """Return text, the notice-voice flag, the startup-end flag, and any lead-in silence."""
         if isinstance(item, SpokenLine):
-            return item.text, item.notice, item.ends_startup
-        return item, False, False
+            return item.text, item.notice, item.ends_startup, item.playback_delay_s
+        return item, False, False, 0.0
 
     def _voice_for(self, use_notice: bool) -> SpeechSynthesizerProtocol:
         """Select the Announcer model for a notice line, otherwise the conversation voice."""

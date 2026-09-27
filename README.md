@@ -464,7 +464,7 @@ voice: "af_bella"
 
 The first line spoken at startup is `announcement` in `glados_config.yaml` (default: "All neural network modules are now loaded. System Operational."). `glados start` and the TUI both play it through `Glados.play_announcement` before conversation begins. That line, and later calls to `Glados.speak_notice(text)`, use a second Piper model when it is present. Every other line — LLM replies and the `speak` tool — stays on `voice` (the bundled GLaDOS Piper model when `voice: "glados"`).
 
-`announcement_followup` is an optional second startup line (default: "Oh. It's you."). It is spoken by `voice` after the notice and `ding_off`, with no Announcer model and no PA chimes. The TUI labels it with that conversation voice. An empty or missing value skips it. `speak_notice` does not append this line.
+`announcement_followup` is an optional second startup line (default: "Oh. It's you."). It is spoken by `voice` after the notice and `ding_off`, with no Announcer model and no PA chimes. `announcement_followup_delay_s` (default 1.0) is silence after `ding_off` before that line. The microphone stays closed through the pause and the follow-up. An empty or missing follow-up skips both the line and the pause. `speak_notice` does not append this line.
 
 This repo does not include the Announcer weights. Copy your own ONNX into the checkout, in the same folder as `models/TTS/glados.onnx`. On Windows and in WSL that is the `models/TTS/` directory of this clone, not a path outside the repo. Do not commit the ONNX, the sidecar, wavs, or checkpoints. Those names are gitignored.
 

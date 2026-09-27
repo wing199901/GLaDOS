@@ -14,11 +14,15 @@ class SpokenLine:
     ``ends_startup`` is set on the last line of the startup sequence. The
     microphone stays closed until that line has finished. Later notices and
     conversation lines leave it false.
+
+    ``playback_delay_s`` is silence before this line starts. The startup
+    follow-up uses it so GLaDOS waits after ``ding_off``.
     """
 
     text: str
     notice: bool = False
     ends_startup: bool = False
+    playback_delay_s: float = 0.0
 
 
 TtsQueueItem = str | SpokenLine

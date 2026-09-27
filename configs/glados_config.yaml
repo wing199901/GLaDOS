@@ -30,6 +30,9 @@ Glados:
   # No Announcer voice and no PA chimes. Personal/local fun only; edit this string freely.
   # Empty or null skips the line and opens the microphone after the notice.
   announcement_followup: "Oh. It's you."
+  # Silence after ding_off before the follow-up. The microphone stays closed.
+  # Ignored when announcement_followup is empty.
+  announcement_followup_delay_s: 1.0
   autonomy:
     enabled: false
     tick_interval_s: 10
