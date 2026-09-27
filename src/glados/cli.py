@@ -5,14 +5,16 @@ from pathlib import Path
 import sys
 
 import httpx
+from loguru import logger
 from rich import print as rprint
 from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn
 import sounddevice as sd  # type: ignore
 
 from .core.engine import Glados, GladosConfig
+from .core.notice_chimes import describe_configured_chime
 from .TTS import tts_glados
 from .utils import spoken_text_converter as stc
-from .utils.resources import resource_path
+from .utils.resources import get_package_root, resource_path
 
 # Type aliases for clarity
 type FileHash = str
@@ -201,6 +203,30 @@ def say(text: str, config_path: str | Path | list[str] | list[Path] = "glados_co
     sd.wait()
 
 
+def log_cli_start(config: GladosConfig, config_path: str | Path | list[str] | list[Path]) -> None:
+    """Log the ``glados start`` entry. This command does not launch the TUI.
+
+    ``uv run`` loads a project ``.env`` before the process starts. A Python
+    repro that calls ``from_config`` directly does not, so an empty
+    ``GLADOS_NOTICE_CHIME_ON`` or ``GLADOS_NOTICE_CHIME_OFF`` silences only
+    the CLI. The module paths show whether ``uv run glados`` imported this
+    checkout or a different install.
+    """
+    engine_file = sys.modules[Glados.__module__].__file__
+    logger.success(
+        "glados start entry: command=start tui=False "
+        f"cli_file={Path(__file__).resolve()} engine_file={engine_file} "
+        f"cwd={Path.cwd()} package_root={get_package_root()} config={config_path!r}"
+    )
+    logger.success(
+        "glados start chimes: "
+        f"{describe_configured_chime('on', config.notice_chime_on, 'GLADOS_NOTICE_CHIME_ON')} "
+        f"{describe_configured_chime('off', config.notice_chime_off, 'GLADOS_NOTICE_CHIME_OFF')} "
+        f"asr_muted={config.asr_muted} tts_enabled={config.tts_enabled} "
+        f"announcement={config.announcement!r}"
+    )
+
+
 def start(
     config_path: str | Path | list[str] | list[Path] = "glados_config.yaml",
     input_mode: str | None = None,
@@ -235,6 +261,7 @@ def start(
         updates["asr_muted"] = asr_muted
     if updates:
         glados_config = glados_config.model_copy(update=updates)
+    log_cli_start(glados_config, config_path)
     glados = Glados.from_config(glados_config)
     if glados.announcement:
         glados.play_announcement()

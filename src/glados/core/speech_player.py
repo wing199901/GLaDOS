@@ -287,7 +287,7 @@ class SpeechPlayer:
         """Play a chime with start_speaking and measure, leaving the mic stream open."""
         play_chime = getattr(self.audio_io, "play_notice_chime", None)
         logger.success(
-            "notice chime start: "
+            "notice chime start (_play_notice_chime): "
             f"backend={type(self.audio_io).__name__} shape={tuple(playback.audio.shape)} "
             f"sr={playback.sample_rate} play_notice_chime={callable(play_chime)}"
         )

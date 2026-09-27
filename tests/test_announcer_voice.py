@@ -24,6 +24,7 @@ from glados.core.notice_chimes import (
     DEFAULT_NOTICE_CHIME_OFF,
     DEFAULT_NOTICE_CHIME_ON,
     NoticeChime,
+    describe_configured_chime,
     load_notice_chime,
     with_chime_edges,
 )
@@ -35,7 +36,7 @@ from glados.observability import ObservabilityBus
 from glados.TTS.announcer import DEFAULT_ANNOUNCER_MODEL, resolve_announcer_model_path, try_load_announcer_voice
 from glados.TTS.piper_config import piper_config_candidates, resolve_piper_config_path
 from glados.TTS.tts_glados import SpeechSynthesizer
-from glados.utils.resources import resource_path
+from glados.utils.resources import find_project_root, resolve_repo_path, resource_path
 
 
 class _FakeVoice:
@@ -795,8 +796,10 @@ def test_notice_chime_logs_and_holds_the_mic(monkeypatch: pytest.MonkeyPatch) ->
         "AudioPlayer received:" in text and "notice=True" in text and "ding_on_loaded=True" in text
         for text in messages
     )
-    assert any(text.startswith("notice chime start:") and "shape=(2,)" in text for text in messages)
-    assert any(text.startswith("notice chime start:") and "shape=(3,)" in text for text in messages)
+    assert any(
+        "notice chime start" in text and "_play_notice_chime" in text and "shape=(2,)" in text for text in messages
+    )
+    assert any("notice chime start" in text and "shape=(3,)" in text for text in messages)
     assert not hold.is_set()
 
 
@@ -1054,6 +1057,53 @@ def test_notice_chime_callback_success_does_not_touch_the_mic() -> None:
     assert io.input_stream is mic
 
 
+def test_installed_layout_resolves_to_the_checkout() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    installed = repo / ".venv" / "Lib" / "site-packages" / "glados" / "utils" / "resources.py"
+    assert find_project_root(installed) == repo
+    assert find_project_root(repo / "src" / "glados" / "utils" / "resources.py") == repo
+
+
+def test_chime_path_falls_back_to_cwd_when_package_root_misses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    wav = tmp_path / "models" / "SFX" / "ding_on.wav"
+    wav.parent.mkdir(parents=True)
+    wav.write_bytes(b"not-a-real-wav")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "glados.utils.resources.resource_path",
+        lambda relative: tmp_path / "missing-root" / relative,
+    )
+
+    assert resolve_repo_path("models/SFX/ding_on.wav") == wav
+    assert load_notice_chime("models/SFX/ding_on.wav") is None
+
+
+def test_cli_start_log_reports_entry_and_chime_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    wav = tmp_path / "models" / "SFX" / "ding_on.wav"
+    wav.parent.mkdir(parents=True)
+    wav.write_bytes(b"not-a-real-wav")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GLADOS_NOTICE_CHIME_ON", raising=False)
+    monkeypatch.setenv("GLADOS_NOTICE_CHIME_OFF", "")
+    monkeypatch.setattr(
+        "glados.utils.resources.resource_path",
+        lambda relative: tmp_path / "missing-root" / relative,
+    )
+
+    on_line = describe_configured_chime("on", "models/SFX/ding_on.wav", "GLADOS_NOTICE_CHIME_ON")
+    off_line = describe_configured_chime("off", None, "GLADOS_NOTICE_CHIME_OFF")
+    cli_source = (Path(__file__).resolve().parents[1] / "src" / "glados" / "cli.py").read_text(encoding="utf-8")
+
+    assert f"on_resolved={wav}" in on_line
+    assert "on_exists=True" in on_line
+    assert "on_env=None" in on_line
+    assert "off_exists=False" in off_line
+    assert "off_env=''" in off_line
+    assert "tui=False" in cli_source
+    assert "log_cli_start(" in cli_source
+    assert "describe_configured_chime(" in cli_source
+
+
 def test_cli_and_tui_both_pass_loaded_chimes_through_from_config() -> None:
     root = Path(__file__).resolve().parents[1]
     cli_source = (root / "src" / "glados" / "cli.py").read_text(encoding="utf-8")
@@ -1061,6 +1111,8 @@ def test_cli_and_tui_both_pass_loaded_chimes_through_from_config() -> None:
     engine_source = (root / "src" / "glados" / "core" / "engine.py").read_text(encoding="utf-8")
 
     assert "Glados.from_config" in cli_source
+    assert "log_cli_start(" in cli_source
+    assert 'command == "tui"' in cli_source
     assert "Glados.from_config" in tui_source
     assert "notice_chime_on=notice_chime_on" in engine_source
     assert "notice_chime_off=notice_chime_off" in engine_source

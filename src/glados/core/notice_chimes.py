@@ -7,6 +7,8 @@ shipped with the repo. A missing file is skipped.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+from pathlib import Path
 
 from loguru import logger
 import numpy as np
@@ -47,7 +49,9 @@ def load_notice_chime(path_value: str | None) -> NoticeChime | None:
 
     wav_path = resolve_repo_path(path_value)
     if not wav_path.is_file():
-        logger.warning(f"Notice chime not found at {wav_path}; that chime will be skipped.")
+        logger.error(
+            f"Notice chime not found at {wav_path} (cwd={Path.cwd()}); that chime will be skipped."
+        )
         return None
 
     try:
@@ -67,6 +71,21 @@ def load_notice_chime(path_value: str | None) -> NoticeChime | None:
         f"samples={len(mono)} ({duration_s:.2f}s)."
     )
     return NoticeChime(audio=mono, sample_rate=int(sample_rate), source=str(wav_path))
+
+
+def describe_configured_chime(label: str, configured: str | None, env_name: str) -> str:
+    """Show the config value, env override, resolved file, and whether it exists."""
+    env_value = os.environ.get(env_name)
+    if configured is None or not str(configured).strip():
+        return (
+            f"{label}_config={configured!r} {label}_env={env_value!r} "
+            f"{label}_resolved=None {label}_exists=False"
+        )
+    resolved = resolve_repo_path(configured)
+    return (
+        f"{label}_config={configured!r} {label}_env={env_value!r} "
+        f"{label}_resolved={resolved} {label}_exists={resolved.is_file()}"
+    )
 
 
 def describe_notice_chime(clip: NoticeChime | None) -> str:
