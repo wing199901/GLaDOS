@@ -400,8 +400,11 @@ uv run glados                           # Voice mode
 uv run glados tui                       # Text UI
 uv run glados start --input-mode text   # Text only
 uv run glados start --input-mode both   # Voice + text
-uv run glados say "The cake is a lie"   # Just TTS
+uv run glados say "The cake is a lie"   # Just TTS, GLaDOS voice
+uv run glados say --announcer "All neural network modules are now loaded. System Operational."
 ```
+
+`glados say` uses the GLaDOS Piper voice. `glados say --announcer` loads `announcer_model_path` (and `GLADOS_ANNOUNCER_MODEL` when set) the same way startup notices do, including `length_scale` from `announcer.onnx.json`. It speaks that text only: no PA chimes. If the Announcer files are missing, the command exits with an error and does not fall back to GLaDOS. `--config` selects the YAML that supplies the path.
 
 ### TUI Controls
 

@@ -33,7 +33,13 @@ from glados.core.speech_player import SpeechPlayer
 from glados.core.spoken_line import SpokenLine
 from glados.core.tts_synthesizer import TextToSpeechSynthesizer
 from glados.observability import ObservabilityBus
-from glados.TTS.announcer import DEFAULT_ANNOUNCER_MODEL, resolve_announcer_model_path, try_load_announcer_voice
+from glados.TTS.announcer import (
+    DEFAULT_ANNOUNCER_MODEL,
+    AnnouncerVoiceUnavailableError,
+    require_announcer_voice,
+    resolve_announcer_model_path,
+    try_load_announcer_voice,
+)
 from glados.TTS.piper_config import piper_config_candidates, resolve_piper_config_path
 from glados.TTS.tts_glados import SpeechSynthesizer
 from glados.utils.resources import find_project_root, resolve_repo_path, resource_path
@@ -240,6 +246,39 @@ def test_announcer_load_uses_model_phoneme_map(tmp_path: Path, monkeypatch: pyte
     assert try_load_announcer_voice(str(model)) == "loaded"
     assert captured["model_path"] == model
     assert captured["kwargs"]["use_config_phoneme_map"] is True
+
+
+def test_require_announcer_voice_refuses_a_missing_model() -> None:
+    with pytest.raises(AnnouncerVoiceUnavailableError, match="does not fall back"):
+        require_announcer_voice(None)
+
+
+def test_require_announcer_voice_uses_sidecar_length_scale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    model = tmp_path / "announcer.onnx"
+    model.write_bytes(b"not-a-real-onnx")
+    config = _piper_json(16000, 9)
+    config["inference"]["length_scale"] = 0.42
+    (tmp_path / "announcer.onnx.json").write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr("glados.TTS.tts_glados.ort.InferenceSession", lambda *_a, **_k: _FakeSession())
+    monkeypatch.setattr("glados.TTS.tts_glados.Phonemizer", _FakePhonemizer)
+
+    voice = require_announcer_voice(str(model))
+
+    assert voice.config.length_scale == 0.42
+    assert voice.sample_rate == 16000
+
+
+def test_say_announcer_flag_is_plain_speech() -> None:
+    source = (Path(__file__).resolve().parents[1] / "src" / "glados" / "cli.py").read_text(encoding="utf-8")
+    say_body = source.split("def say(", 1)[1].split("\ndef ", 1)[0]
+
+    assert "--announcer" in source
+    assert "require_announcer_voice" in say_body
+    assert "SpeechSynthesizer()" in say_body
+    assert "SpokenTextConverter" in say_body
+    assert "ding" not in say_body
+    assert "play_notice_chime" not in say_body
+    assert "return say(args.text, args.config, announcer=args.announcer)" in source
 
 
 def test_announcer_load_failure_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -13,6 +13,7 @@ import sounddevice as sd  # type: ignore
 from .core.engine import Glados, GladosConfig
 from .core.notice_chimes import describe_configured_chime
 from .TTS import tts_glados
+from .TTS.announcer import AnnouncerVoiceUnavailableError, require_announcer_voice
 from .utils import spoken_text_converter as stc
 from .utils.resources import get_package_root, resource_path
 
@@ -174,33 +175,54 @@ def models_valid() -> bool:
     return True
 
 
-def say(text: str, config_path: str | Path | list[str] | list[Path] = "glados_config.yaml") -> None:
+def say(
+    text: str,
+    config_path: str | Path | list[str] | list[Path] = "glados_config.yaml",
+    announcer: bool = False,
+) -> int:
     """
-    Converts text to speech using the GLaDOS text-to-speech system and plays the generated audio.
+    Converts text to speech and plays the generated audio.
 
     Parameters:
-        text (str): The text to be spoken by the GLaDOS voice assistant.
+        text (str): The text to be spoken.
         config_path (str | Path | list, optional): Path to the configuration YAML file(s).
-            Defaults to "glados_config.yaml".
+            Defaults to "glados_config.yaml". Used when ``announcer`` is true so
+            ``announcer_model_path`` and ``GLADOS_ANNOUNCER_MODEL`` apply.
+        announcer: Speak with the local Announcer Piper model instead of GLaDOS.
+            A missing model returns 1 and does not fall back. This path is plain
+            speech: it does not play PA chimes.
 
     Notes:
-        - Uses a text-to-speech synthesizer to generate audio
-        - Converts input text to a spoken format before synthesis
+        - Converts input text with SpokenTextConverter before synthesis
         - Plays the generated audio using the system's default sound device
         - Blocks execution until audio playback is complete
 
     Example:
-        say("Hello, world!")  # Speaks the text using GLaDOS voice
+        say("Hello, world!")  # Speaks the text using the GLaDOS voice
     """
-    glados_tts = tts_glados.SpeechSynthesizer()
+    if announcer:
+        config = GladosConfig.from_yaml(config_path)
+        try:
+            glados_tts = require_announcer_voice(config.announcer_model_path)
+        except AnnouncerVoiceUnavailableError as exc:
+            logger.error(str(exc))
+            return 1
+        logger.success(
+            "glados say voice=Announcer "
+            f"model={config.announcer_model_path!r} length_scale={glados_tts.config.length_scale}"
+        )
+    else:
+        glados_tts = tts_glados.SpeechSynthesizer()
+        logger.success("glados say voice=GLaDOS")
     converter = stc.SpokenTextConverter()
     converted_text = converter.text_to_spoken(text)
     # Generate the audio to from the text
     audio = glados_tts.generate_speech_audio(converted_text)
 
-    # Play the audio
+    # Play the audio. No notice chimes: this is a one-shot TTS check.
     sd.play(audio, glados_tts.sample_rate)
     sd.wait()
+    return 0
 
 
 def log_cli_start(config: GladosConfig, config_path: str | Path | list[str] | list[Path]) -> None:
@@ -417,8 +439,20 @@ def main() -> int:
     )
 
     # Say command
-    say_parser = subparsers.add_parser("say", help="Make GLaDOS speak text")
-    say_parser.add_argument("text", type=str, help="Text for GLaDOS to speak")
+    say_parser = subparsers.add_parser(
+        "say",
+        help="Speak text with the GLaDOS voice, or the Announcer voice with --announcer",
+    )
+    say_parser.add_argument("text", type=str, help="Text to speak")
+    say_parser.add_argument(
+        "--announcer",
+        action="store_true",
+        help=(
+            "Speak with the local Announcer Piper model from announcer_model_path "
+            "(or GLADOS_ANNOUNCER_MODEL). Uses that model's announcer.onnx.json settings, "
+            "including length_scale. Fails if the model cannot be loaded. Does not play PA chimes."
+        ),
+    )
     parser_add_config(say_parser)
 
     args = parser.parse_args()
@@ -430,7 +464,7 @@ def main() -> int:
             print("Some model files are invalid or missing. Please run 'uv run glados download'")
             return 1
         if args.command == "say":
-            say(args.text, args.config)
+            return say(args.text, args.config, announcer=args.announcer)
         elif args.command == "start":
             start(
                 args.config,
