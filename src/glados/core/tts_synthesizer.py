@@ -8,7 +8,7 @@ import numpy as np
 from ..observability import ObservabilityBus, trim_message
 from ..TTS import SpeechSynthesizerProtocol
 from ..utils import spoken_text_converter as stc
-from .audio_data import AudioMessage
+from .audio_data import SPEAKER_ANNOUNCER, SPEAKER_GLADOS, AudioMessage
 from .spoken_line import SpokenLine, TtsQueueItem
 
 
@@ -108,6 +108,7 @@ class TextToSpeechSynthesizer:
                             text=spoken_text_variant,
                             is_eos=False,
                             sample_rate=voice.sample_rate,
+                            speaker=SPEAKER_ANNOUNCER if voice is self.notice_model else SPEAKER_GLADOS,
                         )
                     )
             except queue.Empty:

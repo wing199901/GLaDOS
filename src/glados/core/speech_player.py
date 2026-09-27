@@ -81,7 +81,7 @@ class SpeechPlayer:
                                 source="tts",
                                 kind="play",
                                 message=trim_message(audio_msg.text),
-                                meta={"audio_samples": 0, "muted": True},
+                                meta={"audio_samples": 0, "muted": True, "speaker": audio_msg.speaker},
                             )
                             self._observability_bus.emit(
                                 source="tts",
@@ -106,7 +106,7 @@ class SpeechPlayer:
                             source="tts",
                             kind="play",
                             message=trim_message(audio_msg.text),
-                            meta={"audio_samples": audio_len},
+                            meta={"audio_samples": audio_len, "speaker": audio_msg.speaker},
                         )
 
                     self.audio_io.start_speaking(audio_msg.audio, playback_rate)

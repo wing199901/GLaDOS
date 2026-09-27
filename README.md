@@ -479,7 +479,7 @@ announcer_model_path: "models/TTS/announcer.onnx"
 
 `GLADOS_ANNOUNCER_MODEL` optionally overrides that path. Set it to empty to force the conversation voice even if the drop-in is present.
 
-If the ONNX, the sidecar, or the model session is missing, startup still speaks. That line uses the conversation voice and the process does not crash.
+If the ONNX, the sidecar, or the model session is missing, startup still speaks. That line uses the conversation voice and the process does not crash. The TUI dialog labels the line **Announcer** only when that model actually synthesized it. Fallback playback stays labeled **GLaDOS**, as do later replies.
 
 ### Custom Personality
 

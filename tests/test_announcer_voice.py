@@ -14,12 +14,13 @@ import numpy as np
 from numpy.typing import NDArray
 import pytest
 
-from glados.core.audio_data import AudioMessage
+from glados.core.audio_data import SPEAKER_ANNOUNCER, SPEAKER_GLADOS, AudioMessage, tts_dialog_role
 from glados.core.conversation_store import ConversationStore
 from glados.core.engine import Glados, GladosConfig
 from glados.core.speech_player import SpeechPlayer
 from glados.core.spoken_line import SpokenLine
 from glados.core.tts_synthesizer import TextToSpeechSynthesizer
+from glados.observability import ObservabilityBus
 from glados.TTS.announcer import DEFAULT_ANNOUNCER_MODEL, resolve_announcer_model_path, try_load_announcer_voice
 from glados.TTS.piper_config import piper_config_candidates, resolve_piper_config_path
 from glados.TTS.tts_glados import SpeechSynthesizer
@@ -354,6 +355,8 @@ def test_startup_line_uses_announcer_then_conversation_returns() -> None:
     ]
     assert messages[0].sample_rate == 16000
     assert messages[1].sample_rate == 22050
+    assert messages[0].speaker == SPEAKER_ANNOUNCER
+    assert messages[1].speaker == SPEAKER_GLADOS
     assert announcer.calls == ["All neural network modules are now loaded."]
     assert conversation.calls == ["The cake is a lie."]
 
@@ -382,6 +385,7 @@ def test_notice_line_falls_back_to_conversation_voice() -> None:
 
     assert len(messages) == 1
     assert messages[0].sample_rate == 22050
+    assert messages[0].speaker == SPEAKER_GLADOS
     assert conversation.calls == ["System Operational."]
 
 
@@ -418,3 +422,52 @@ def test_player_uses_line_sample_rate() -> None:
     worker.join(timeout=2)
 
     assert audio.played == [(16000, "")]
+
+
+def test_play_event_labels_announcer_and_fallback_stays_glados() -> None:
+    assert tts_dialog_role({"speaker": SPEAKER_ANNOUNCER}) == "Announcer"
+    assert tts_dialog_role({"speaker": SPEAKER_GLADOS}) == "GLaDOS"
+    assert tts_dialog_role({}) == "GLaDOS"
+    assert tts_dialog_role(None) == "GLaDOS"
+
+    audio = _FakeAudio()
+    outgoing: queue.Queue[AudioMessage] = queue.Queue()
+    shutdown = threading.Event()
+    bus = ObservabilityBus()
+    player = SpeechPlayer(
+        audio_io=audio,  # type: ignore[arg-type]
+        audio_output_queue=outgoing,
+        conversation_store=ConversationStore(),
+        tts_sample_rate=22050,
+        shutdown_event=shutdown,
+        currently_speaking_event=threading.Event(),
+        processing_active_event=threading.Event(),
+        pause_time=0.01,
+        observability_bus=bus,
+    )
+    worker = threading.Thread(target=player.run, daemon=True)
+    worker.start()
+    outgoing.put(
+        AudioMessage(
+            audio=np.ones(4, dtype=np.float32),
+            text="All neural network modules are now loaded.",
+            speaker=SPEAKER_ANNOUNCER,
+        )
+    )
+    outgoing.put(AudioMessage(audio=np.ones(4, dtype=np.float32), text="The cake is a lie."))
+
+    deadline = time.time() + 2.0
+    play_events = []
+    while time.time() < deadline:
+        play_events = [event for event in bus.snapshot() if event.kind == "play"]
+        if len(play_events) >= 2:
+            break
+        time.sleep(0.01)
+    shutdown.set()
+    worker.join(timeout=2)
+
+    assert [tts_dialog_role(event.meta) for event in play_events] == ["Announcer", "GLaDOS"]
+    assert [event.message for event in play_events] == [
+        "All neural network modules are now loaded.",
+        "The cake is a lie.",
+    ]
