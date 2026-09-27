@@ -23,6 +23,8 @@ Glados:
   # (set either to empty to disable that chime). Conversation lines do not play these.
   notice_chime_on: "models/SFX/ding_on.wav"
   notice_chime_off: "models/SFX/ding_off.wav"
+  # Mic echo often cuts the notice speech short. ding_off still plays unless this is false.
+  notice_chime_off_after_interrupt: true
   announcement: "All neural network modules are now loaded. System Operational."
   autonomy:
     enabled: false

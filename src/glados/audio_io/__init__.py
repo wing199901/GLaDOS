@@ -37,7 +37,13 @@ class AudioProtocol(Protocol):
         """Stop capturing microphone samples."""
         ...
 
-    def start_speaking(self, audio_data: NDArray[np.float32], sample_rate: int | None = None, text: str = "") -> None:
+    def start_speaking(
+        self,
+        audio_data: NDArray[np.float32],
+        sample_rate: int | None = None,
+        text: str = "",
+        interruptible: bool = True,
+    ) -> None:
         """Queue audio for playback."""
         ...
 

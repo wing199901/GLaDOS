@@ -10,7 +10,14 @@ from ..audio_io import AudioProtocol
 from ..observability import ObservabilityBus, trim_message
 from .audio_data import AudioMessage
 from .conversation_store import ConversationStore
-from .notice_chimes import NoticeChime
+from .notice_chimes import (
+    DEFAULT_CHIME_GAP_S,
+    DEFAULT_CHIME_LEAD_S,
+    DEFAULT_CHIME_TAIL_S,
+    NoticeChime,
+    describe_notice_chime,
+    with_chime_edges,
+)
 
 
 class SpeechPlayer:
@@ -35,6 +42,11 @@ class SpeechPlayer:
         observability_bus: ObservabilityBus | None = None,
         chime_on: NoticeChime | None = None,
         chime_off: NoticeChime | None = None,
+        chime_off_after_interrupt: bool = True,
+        chime_hold_event: threading.Event | None = None,
+        chime_lead_s: float = DEFAULT_CHIME_LEAD_S,
+        chime_tail_s: float = DEFAULT_CHIME_TAIL_S,
+        chime_gap_s: float = DEFAULT_CHIME_GAP_S,
     ) -> None:
         self.audio_io = audio_io
         self.audio_output_queue = audio_output_queue
@@ -49,6 +61,13 @@ class SpeechPlayer:
         self._observability_bus = observability_bus
         self._chime_on = chime_on
         self._chime_off = chime_off
+        self._chime_off_after_interrupt = chime_off_after_interrupt
+        self._chime_hold_event = chime_hold_event
+        self._chime_lead_s = chime_lead_s
+        self._chime_tail_s = chime_tail_s
+        self._chime_gap_s = chime_gap_s
+        self._log_armed_chime("ding_on", chime_on)
+        self._log_armed_chime("ding_off", chime_off)
 
     def run(self) -> None:
         """
@@ -77,6 +96,8 @@ class SpeechPlayer:
                     continue
 
                 if tts_muted:
+                    if audio_msg.notice:
+                        logger.info("Notice chimes skipped: TTS is muted.")
                     if audio_msg.text:
                         logger.info(f"Assistant: {audio_msg.text}")
                         if self._interaction_state:
@@ -114,19 +135,24 @@ class SpeechPlayer:
                             meta={"audio_samples": audio_len, "speaker": audio_msg.speaker},
                         )
 
-                    # Notice lines: ding_on, then speech, then ding_off after speech
-                    # finishes. Conversation lines leave both clips unused. A missing
-                    # clip is None and is skipped. An interrupt during ding_on skips
-                    # the speech and ding_off. An interrupt during speech skips ding_off.
-                    chime_interrupted = audio_msg.notice and self._play_chime(self._chime_on)
-                    if chime_interrupted:
-                        interrupted, percentage_played = True, 0
-                    else:
-                        self.audio_io.start_speaking(audio_msg.audio, playback_rate)
-                        logger.success(f"TTS text: {audio_msg.text}")
-                        interrupted, percentage_played = self.audio_io.measure_percentage_spoken(
-                            audio_len, playback_rate
-                        )
+                    # Notice lines only. The mic must not cut the chimes: echo often
+                    # trips VAD, and a ~0.2s ding is gone if that aborts the stream.
+                    # ding_off still plays after an interrupted notice unless config
+                    # turns that off. Conversation lines never enter this branch.
+                    if audio_msg.notice:
+                        self._hold_chime()
+                        try:
+                            self._play_notice_chime(self._chime_on, "ding_on")
+                            if self._chime_on is not None and self._chime_gap_s > 0:
+                                time.sleep(self._chime_gap_s)
+                        finally:
+                            self._release_chime()
+
+                    self.audio_io.start_speaking(audio_msg.audio, playback_rate)
+                    logger.success(f"TTS text: {audio_msg.text}")
+                    interrupted, percentage_played = self.audio_io.measure_percentage_spoken(
+                        audio_len, playback_rate
+                    )
 
                     if interrupted:
                         clipped_text = self.clip_interrupted_sentence(audio_msg.text, percentage_played)
@@ -164,10 +190,19 @@ class SpeechPlayer:
                                 kind="finish",
                                 message=trim_message(audio_msg.text),
                             )
-                        if audio_msg.notice:
-                            # ding_off is after the line is done. Stopping it does not
-                            # rewind the spoken text or clear the rest of the queue.
-                            self._play_chime(self._chime_off)
+                    if audio_msg.notice and (not interrupted or self._chime_off_after_interrupt):
+                        if interrupted:
+                            logger.info("Notice speech was interrupted; still playing ding_off.")
+                        self._hold_chime()
+                        try:
+                            self._play_notice_chime(self._chime_off, "ding_off")
+                        finally:
+                            self._release_chime()
+                    elif audio_msg.notice:
+                        logger.info(
+                            "Notice chime skipped (ding_off): speech was interrupted "
+                            "and notice_chime_off_after_interrupt is off."
+                        )
 
                     self.currently_speaking_event.clear()
     
@@ -182,20 +217,58 @@ class SpeechPlayer:
                 time.sleep(self.pause_time)  # small sleep here to prevent tight loop on persistent error
         logger.info("AudioPlayer thread finished.")
 
-    def _play_chime(self, clip: NoticeChime | None) -> bool:
-        """Play one chime and return whether the listener interrupted it.
+    @staticmethod
+    def _log_armed_chime(label: str, clip: NoticeChime | None) -> None:
+        detail = describe_notice_chime(clip)
+        if clip is None:
+            logger.info(f"Notice chime {label} not armed: {detail}.")
+        else:
+            logger.success(f"Notice chime {label} armed: {detail}.")
 
-        A missing or unreadable clip returns False so speech still plays.
+    def _play_notice_chime(self, clip: NoticeChime | None, label: str) -> None:
+        """Play one notice chime through to the end.
+
+        Missing clips are logged and skipped. Playback ignores mic barge-in so
+        a speaker echo cannot erase the ding. A failure here does not drop the
+        spoken line.
         """
-        if clip is None or clip.audio.size == 0:
-            return False
+        if clip is None:
+            logger.info(f"Notice chime skipped ({label}): not loaded.")
+            return
+        if clip.audio.size == 0:
+            logger.info(f"Notice chime skipped ({label}): empty clip at {clip.source}.")
+            return
+
+        playback = with_chime_edges(clip, self._chime_lead_s, self._chime_tail_s)
+        seconds = len(clip.audio) / clip.sample_rate if clip.sample_rate else 0.0
+        logger.success(
+            f"Notice chime started ({label}) from {clip.source}: "
+            f"{clip.sample_rate} Hz, {len(clip.audio)} samples, {seconds:.2f}s."
+        )
         try:
-            self.audio_io.start_speaking(clip.audio, clip.sample_rate)
-            interrupted, _percentage = self.audio_io.measure_percentage_spoken(len(clip.audio), clip.sample_rate)
-            return bool(interrupted)
+            self.audio_io.start_speaking(playback.audio, playback.sample_rate, interruptible=False)
+            interrupted, percentage = self.audio_io.measure_percentage_spoken(
+                len(playback.audio), playback.sample_rate
+            )
         except Exception:  # noqa: BLE001 - a bad chime must not drop the spoken line
-            logger.exception("Notice chime playback failed; continuing without that chime.")
-            return False
+            logger.exception(f"Notice chime failed ({label}) from {clip.source}; continuing without that chime.")
+            return
+
+        if interrupted:
+            logger.warning(
+                f"Notice chime cut short ({label}) from {clip.source} at {percentage}%. Continuing the notice."
+            )
+        else:
+            logger.success(f"Notice chime finished ({label}) from {clip.source}.")
+
+    def _hold_chime(self) -> None:
+        """Keep the mic from treating this chime as the user talking."""
+        if self._chime_hold_event is not None:
+            self._chime_hold_event.set()
+
+    def _release_chime(self) -> None:
+        if self._chime_hold_event is not None:
+            self._chime_hold_event.clear()
 
     def _clear_audio_queue(self) -> None:
         """Clears the audio output queue and resets the speaking event.

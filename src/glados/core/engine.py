@@ -126,6 +126,8 @@ class GladosConfig(BaseModel):
     # Do not commit those wavs. Conversation lines never play them.
     notice_chime_on: str | None = DEFAULT_NOTICE_CHIME_ON
     notice_chime_off: str | None = DEFAULT_NOTICE_CHIME_OFF
+    # Mic echo often interrupts the notice speech. Still play ding_off unless this is false.
+    notice_chime_off_after_interrupt: bool = True
     announcement: str | None
     llm_headers: dict[str, str] | None = None
     tui_theme: str | None = None
@@ -286,6 +288,7 @@ class Glados:
         notice_tts_model: SpeechSynthesizerProtocol | None = None,
         notice_chime_on: NoticeChime | None = None,
         notice_chime_off: NoticeChime | None = None,
+        notice_chime_off_after_interrupt: bool = True,
     ) -> None:
         """
         Initialize the Glados voice assistant with configuration parameters.
@@ -302,7 +305,10 @@ class Glados:
             notice_tts_model: Optional second Piper model for the startup announcement and
                 other short notice lines. Missing means those lines use ``tts_model``.
             notice_chime_on: Optional ding played before a notice line. Missing skips it.
-            notice_chime_off: Optional ding played after a notice line finishes. Missing skips it.
+            notice_chime_off: Optional ding played after a notice line. Missing skips it.
+                Still played when the speech was interrupted, unless
+                ``notice_chime_off_after_interrupt`` is false.
+            notice_chime_off_after_interrupt: Play ding_off after an interrupted notice.
             completion_url (HttpUrl): The URL for the LLM completion endpoint.
             llm_model (str): The name of the LLM model to use.
             api_key (str | None): API key for accessing the LLM service, if required.
@@ -324,6 +330,7 @@ class Glados:
         self._notice_tts = notice_tts_model
         self._notice_chime_on = notice_chime_on
         self._notice_chime_off = notice_chime_off
+        self._notice_chime_off_after_interrupt = notice_chime_off_after_interrupt
         self.input_mode = input_mode
         self.completion_url = completion_url
         self.llm_model = llm_model
@@ -376,6 +383,8 @@ class Glados:
         # Initialize events for thread synchronization
         self.processing_active_event = threading.Event()  # Indicates if input processing is active (ASR + LLM + TTS + VLM)
         self.currently_speaking_event = threading.Event()  # Indicates if the assistant is currently speaking
+        # Set while a notice chime is playing so the mic does not treat it as the user.
+        self.notice_chime_hold_event = threading.Event()
         self.shutdown_event = threading.Event()  # Event to signal shutdown of all threads
 
         # Initialize shutdown orchestrator for graceful shutdown
@@ -469,6 +478,7 @@ class Glados:
                 asr_muted_event=self.asr_muted_event,
                 audio_state=self.audio_state,
                 on_interrupt=lambda _: self._push_emotion_event("user", "User interrupted me mid-sentence"),
+                chime_hold_event=self.notice_chime_hold_event,
             )
         if self.input_mode in {"text", "both"}:
             if self.input_mode == "text":
@@ -583,6 +593,8 @@ class Glados:
             observability_bus=self.observability_bus,
             chime_on=self._notice_chime_on,
             chime_off=self._notice_chime_off,
+            chime_off_after_interrupt=self._notice_chime_off_after_interrupt,
+            chime_hold_event=self.notice_chime_hold_event,
         )
 
         self.vision_processor = None
@@ -930,6 +942,7 @@ class Glados:
                 notice_tts_model=notice_tts_model,
                 notice_chime_on=notice_chime_on,
                 notice_chime_off=notice_chime_off,
+                notice_chime_off_after_interrupt=config.notice_chime_off_after_interrupt,
                 audio_io=audio_io,
                 completion_url=config.completion_url,
                 llm_model=config.llm_model,

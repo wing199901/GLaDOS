@@ -481,7 +481,11 @@ announcer_model_path: "models/TTS/announcer.onnx"
 
 If the ONNX, the sidecar, or the model session is missing, startup still speaks. That line uses the conversation voice and the process does not crash. The TUI dialog labels the line **Announcer** only when that model actually synthesized it. Fallback playback stays labeled **GLaDOS**, as do later replies.
 
-Notice lines can also play a short PA chime before the speech and another after it finishes: `ding_on`, then the line, then `ding_off`. That bracket is for `play_announcement` and `speak_notice` only. LLM replies and the `speak` tool do not get chimes. The chimes still play when the Announcer model is missing and the line falls back to the GLaDOS voice; the TUI label stays **GLaDOS** in that case. Muted TTS skips the chimes along with the speech.
+Notice lines can also play a short PA chime before the speech and another after it finishes: `ding_on`, a short gap, then the line, then `ding_off`. That bracket is for `play_announcement` and `speak_notice` only. LLM replies and the `speak` tool do not get chimes. The chimes still play when the Announcer model is missing and the line falls back to the GLaDOS voice; the TUI label stays **GLaDOS** in that case. Muted TTS skips the chimes along with the speech.
+
+`glados start` and the TUI both build the assistant with `Glados.from_config`, which loads these wavs and passes them to the speech player. Startup logs `Notice chime ding_on armed` and `Notice chime ding_off armed` when the files loaded, and `Notice chime started` / `Notice chime finished` each time one plays. A skip log includes the reason (empty path, file missing, TTS muted).
+
+The microphone does not cut a chime short. Speaker echo often trips voice detection during TTS, which used to skip `ding_off` entirely. `ding_off` still plays after an interrupted notice. Set `notice_chime_off_after_interrupt: false` to keep the old skip. The speech itself can still be interrupted.
 
 Copy your own wavs into the checkout. These files are personal local playback only. Do not commit Valve audio. The names are gitignored:
 

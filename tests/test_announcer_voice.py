@@ -10,6 +10,7 @@ import threading
 import time
 from typing import Any
 
+from loguru import logger
 import numpy as np
 from numpy.typing import NDArray
 import pytest
@@ -23,7 +24,9 @@ from glados.core.notice_chimes import (
     DEFAULT_NOTICE_CHIME_ON,
     NoticeChime,
     load_notice_chime,
+    with_chime_edges,
 )
+from glados.core.speech_listener import SpeechListener
 from glados.core.speech_player import SpeechPlayer
 from glados.core.spoken_line import SpokenLine
 from glados.core.tts_synthesizer import TextToSpeechSynthesizer
@@ -51,23 +54,38 @@ class _IdentityConverter:
 
 
 class _FakeAudio:
-    def __init__(self, interrupts: list[bool] | None = None) -> None:
+    def __init__(self, interrupts: list[bool] | None = None, hold: threading.Event | None = None) -> None:
         self.played: list[tuple[int | None, str]] = []
         self.clips: list[tuple[int | None, int]] = []
+        self.interruptible_flags: list[bool] = []
+        self.hold_during_start: list[bool] = []
         self._interrupts = list(interrupts or [])
+        self._hold = hold
 
     def start_speaking(
         self,
         audio_data: NDArray[np.float32],
         sample_rate: int | None = None,
         text: str = "",
+        interruptible: bool = True,
     ) -> None:
         self.played.append((sample_rate, text))
         self.clips.append((sample_rate, len(audio_data)))
+        self.interruptible_flags.append(interruptible)
+        self.hold_during_start.append(bool(self._hold is not None and self._hold.is_set()))
 
     def measure_percentage_spoken(self, total_samples: int, sample_rate: int | None = None) -> tuple[bool, int]:
         interrupted = self._interrupts.pop(0) if self._interrupts else False
         return interrupted, 0 if interrupted else 100
+
+    def stop_speaking(self) -> None:
+        return None
+
+    def get_sample_queue(self) -> queue.Queue[tuple[NDArray[np.float32], bool]]:
+        return queue.Queue()
+
+    def stop_listening(self) -> None:
+        return None
 
 
 def _minimal_glados_yaml(announcer_line: str | None) -> str:
@@ -254,6 +272,7 @@ def test_shipped_config_uses_in_repo_announcer_path(monkeypatch: pytest.MonkeyPa
     assert loaded.notice_chime_off == DEFAULT_NOTICE_CHIME_OFF
     assert loaded.notice_chime_on is not None
     assert not Path(loaded.notice_chime_on).is_absolute()
+    assert loaded.notice_chime_off_after_interrupt is True
 
 
 def test_relative_announcer_path_resolves_from_package_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -491,8 +510,8 @@ def test_play_event_labels_announcer_and_fallback_stays_glados() -> None:
     ]
 
 
-def _chime(length: int, sample_rate: int) -> NoticeChime:
-    return NoticeChime(audio=np.ones(length, dtype=np.float32), sample_rate=sample_rate)
+def _chime(length: int, sample_rate: int, source: str = "models/SFX/ding_on.wav") -> NoticeChime:
+    return NoticeChime(audio=np.ones(length, dtype=np.float32), sample_rate=sample_rate, source=source)
 
 
 def _play_one(
@@ -502,10 +521,19 @@ def _play_one(
     chime_off: NoticeChime | None = None,
     interrupts: list[bool] | None = None,
     extra: list[AudioMessage] | None = None,
+    chime_off_after_interrupt: bool = True,
+    chime_gap_s: float = 0.0,
+    chime_lead_s: float = 0.0,
+    chime_tail_s: float = 0.0,
+    hold: threading.Event | None = None,
+    tts_muted: bool = False,
 ) -> tuple[_FakeAudio, queue.Queue[AudioMessage]]:
-    audio = _FakeAudio(interrupts)
+    audio = _FakeAudio(interrupts, hold)
     outgoing: queue.Queue[AudioMessage] = queue.Queue()
     shutdown = threading.Event()
+    muted = threading.Event()
+    if tts_muted:
+        muted.set()
     player = SpeechPlayer(
         audio_io=audio,  # type: ignore[arg-type]
         audio_output_queue=outgoing,
@@ -515,8 +543,14 @@ def _play_one(
         currently_speaking_event=threading.Event(),
         processing_active_event=threading.Event(),
         pause_time=0.01,
+        tts_muted_event=muted,
         chime_on=chime_on,
         chime_off=chime_off,
+        chime_off_after_interrupt=chime_off_after_interrupt,
+        chime_hold_event=hold,
+        chime_lead_s=chime_lead_s,
+        chime_tail_s=chime_tail_s,
+        chime_gap_s=chime_gap_s,
     )
     outgoing.put(message)
     for item in extra or []:
@@ -547,6 +581,7 @@ def test_notice_line_plays_chime_speech_chime() -> None:
     )
 
     assert audio.clips == [(44100, 2), (16000, 4), (44100, 3)]
+    assert audio.interruptible_flags == [False, True, False]
 
 
 def test_conversation_line_skips_chimes() -> None:
@@ -573,9 +608,8 @@ def test_missing_chimes_still_speak_the_notice() -> None:
     assert audio.clips == [(16000, 4)]
 
 
-def test_interrupt_during_ding_on_skips_speech_and_ding_off() -> None:
-    pending = AudioMessage(audio=np.ones(4, dtype=np.float32), text="still queued")
-    audio, outgoing = _play_one(
+def test_chime_report_of_interrupt_does_not_drop_the_notice() -> None:
+    audio, _outgoing = _play_one(
         AudioMessage(
             audio=np.ones(8, dtype=np.float32),
             text="System Operational.",
@@ -583,16 +617,14 @@ def test_interrupt_during_ding_on_skips_speech_and_ding_off() -> None:
             notice=True,
         ),
         chime_on=_chime(2, 44100),
-        chime_off=_chime(3, 44100),
+        chime_off=_chime(3, 44100, "models/SFX/ding_off.wav"),
         interrupts=[True],
-        extra=[pending],
     )
 
-    assert audio.clips == [(44100, 2)]
-    assert outgoing.empty()
+    assert audio.clips == [(44100, 2), (16000, 8), (44100, 3)]
 
 
-def test_interrupt_during_speech_skips_ding_off() -> None:
+def test_interrupt_during_speech_still_plays_ding_off() -> None:
     audio, _outgoing = _play_one(
         AudioMessage(
             audio=np.ones(8, dtype=np.float32),
@@ -603,6 +635,23 @@ def test_interrupt_during_speech_skips_ding_off() -> None:
         chime_on=_chime(2, 44100),
         chime_off=_chime(3, 44100),
         interrupts=[False, True],
+    )
+
+    assert audio.clips == [(44100, 2), (16000, 8), (44100, 3)]
+
+
+def test_ding_off_can_be_configured_off_after_interrupt() -> None:
+    audio, _outgoing = _play_one(
+        AudioMessage(
+            audio=np.ones(8, dtype=np.float32),
+            text="System Operational.",
+            sample_rate=16000,
+            notice=True,
+        ),
+        chime_on=_chime(2, 44100),
+        chime_off=_chime(3, 44100, "models/SFX/ding_off.wav"),
+        interrupts=[False, True],
+        chime_off_after_interrupt=False,
     )
 
     assert audio.clips == [(44100, 2), (16000, 8)]
@@ -645,3 +694,148 @@ def test_config_notice_chime_defaults_and_env(tmp_path: Path, monkeypatch: pytes
     overridden = GladosConfig.from_yaml(config_file)
     assert overridden.notice_chime_on is None
     assert overridden.notice_chime_off == "models/SFX/custom_off.wav"
+    assert loaded.notice_chime_off_after_interrupt is True
+
+
+def test_chime_edges_keep_the_ding_away_from_the_buffer_ends() -> None:
+    clip = NoticeChime(audio=np.ones(10, dtype=np.float32), sample_rate=100, source="ding_on.wav")
+    edged = with_chime_edges(clip, lead_s=0.02, tail_s=0.05)
+
+    assert edged.audio.shape == (17,)
+    assert np.all(edged.audio[:2] == 0)
+    assert np.all(edged.audio[-5:] == 0)
+    np.testing.assert_array_equal(edged.audio[2:12], clip.audio)
+    assert edged.source == clip.source
+
+
+def test_notice_chime_logs_and_holds_the_mic(monkeypatch: pytest.MonkeyPatch) -> None:
+    messages: list[str] = []
+    slept: list[float] = []
+
+    def _sink(message: object) -> None:
+        record = getattr(message, "record", None)
+        if record is not None:
+            messages.append(str(record["message"]))
+
+    monkeypatch.setattr("glados.core.speech_player.time.sleep", lambda seconds: slept.append(seconds))
+    sink_id = logger.add(_sink, level="INFO")
+    hold = threading.Event()
+    try:
+        audio, _outgoing = _play_one(
+            AudioMessage(
+                audio=np.ones(4, dtype=np.float32),
+                text="System Operational.",
+                sample_rate=16000,
+                notice=True,
+            ),
+            chime_on=_chime(2, 44100),
+            chime_off=_chime(3, 44100, "models/SFX/ding_off.wav"),
+            hold=hold,
+            chime_gap_s=0.1,
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert slept == [0.1]
+    assert audio.hold_during_start == [True, False, True]
+    assert audio.interruptible_flags == [False, True, False]
+    started = "Notice chime started (ding_on) from models/SFX/ding_on.wav: 44100 Hz, 2 samples, 0.00s."
+    assert started in messages
+    assert any(text.startswith("Notice chime finished (ding_on)") for text in messages)
+    assert any(text.startswith("Notice chime finished (ding_off)") for text in messages)
+    assert not hold.is_set()
+
+
+def test_muted_notice_skips_chimes() -> None:
+    messages: list[str] = []
+
+    def _sink(message: object) -> None:
+        record = getattr(message, "record", None)
+        if record is not None:
+            messages.append(str(record["message"]))
+
+    sink_id = logger.add(_sink, level="INFO")
+    try:
+        audio, _outgoing = _play_one(
+            AudioMessage(
+                audio=np.ones(4, dtype=np.float32),
+                text="System Operational.",
+                sample_rate=16000,
+                notice=True,
+            ),
+            chime_on=_chime(2, 44100),
+            chime_off=_chime(3, 44100, "models/SFX/ding_off.wav"),
+            tts_muted=True,
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert audio.clips == []
+    assert any(text == "Notice chimes skipped: TTS is muted." for text in messages)
+
+
+def test_chime_hold_and_asr_mute_do_not_cut_playback() -> None:
+    class _Io:
+        def __init__(self) -> None:
+            self.stopped = 0
+            self.samples: queue.Queue[tuple[NDArray[np.float32], bool]] = queue.Queue()
+
+        def get_sample_queue(self) -> queue.Queue[tuple[NDArray[np.float32], bool]]:
+            return self.samples
+
+        def stop_speaking(self) -> None:
+            self.stopped += 1
+
+        def stop_listening(self) -> None:
+            return None
+
+    io = _Io()
+    hold = threading.Event()
+    listener = SpeechListener(
+        audio_io=io,  # type: ignore[arg-type]
+        llm_queue=queue.Queue(),
+        shutdown_event=threading.Event(),
+        currently_speaking_event=threading.Event(),
+        processing_active_event=threading.Event(),
+        asr_model=object(),  # type: ignore[arg-type]
+        wake_word=None,
+        pause_time=0.01,
+        chime_hold_event=hold,
+    )
+    listener.currently_speaking_event.set()
+    sample = np.zeros(8, dtype=np.float32)
+    hold.set()
+    listener._manage_pre_activation_buffer(sample, True)
+    assert io.stopped == 0
+    assert listener._recording_started is False
+
+    hold.clear()
+    listener._manage_pre_activation_buffer(sample, True)
+    assert io.stopped == 1
+
+    muted_io = _Io()
+    muted = threading.Event()
+    muted.set()
+    shutdown = threading.Event()
+    muted_listener = SpeechListener(
+        audio_io=muted_io,  # type: ignore[arg-type]
+        llm_queue=queue.Queue(),
+        shutdown_event=shutdown,
+        currently_speaking_event=threading.Event(),
+        processing_active_event=threading.Event(),
+        asr_model=object(),  # type: ignore[arg-type]
+        wake_word=None,
+        pause_time=0.01,
+        asr_muted_event=muted,
+    )
+    muted_listener.currently_speaking_event.set()
+    muted_io.samples.put((sample, True))
+    worker = threading.Thread(target=muted_listener.run, daemon=True)
+    worker.start()
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not muted_io.samples.empty():
+        time.sleep(0.01)
+    shutdown.set()
+    worker.join(timeout=2)
+
+    assert muted_io.stopped == 0

@@ -2,6 +2,7 @@
 
 import queue
 import threading
+import time
 
 from loguru import logger
 import numpy as np
@@ -52,6 +53,7 @@ class SoundDeviceAudioIO(AudioIO):
         self._stop_event = threading.Event()
         self._pending_audio: NDArray[np.float32] | None = None
         self._pending_sample_rate: int = self.SAMPLE_RATE
+        self._playback_interruptible = True
 
     def start_listening(self) -> None:
         """Start capturing audio from the system microphone.
@@ -122,7 +124,13 @@ class SoundDeviceAudioIO(AudioIO):
             finally:
                 self.input_stream = None
 
-    def start_speaking(self, audio_data: NDArray[np.float32], sample_rate: int | None = None, text: str = "") -> None:
+    def start_speaking(
+        self,
+        audio_data: NDArray[np.float32],
+        sample_rate: int | None = None,
+        text: str = "",
+        interruptible: bool = True,
+    ) -> None:
         """Queue audio for playback through the system speakers.
 
         Stores audio data for playback via measure_percentage_spoken(), which
@@ -147,6 +155,7 @@ class SoundDeviceAudioIO(AudioIO):
         # Stop any existing playback and create a fresh stop event for this session
         self.stop_speaking()
         self._stop_event = threading.Event()
+        self._playback_interruptible = interruptible
 
         # Resample to the output device's native sample rate so PortAudio's
         # low-quality built-in sample-rate converter is never used. This avoids
@@ -224,7 +233,7 @@ class SoundDeviceAudioIO(AudioIO):
             """Fill the next output block and track completion or interruption."""
             nonlocal position, interrupted
 
-            if stop_event.is_set():
+            if stop_event.is_set() and self._playback_interruptible:
                 outdata.fill(0)
                 interrupted = True
                 completion_event.set()
@@ -248,10 +257,21 @@ class SoundDeviceAudioIO(AudioIO):
         try:
             logger.debug(f"Using sample rate: {sample_rate} Hz, total samples: {effective_total}")
             max_timeout = effective_total / sample_rate + 1
+            playback_finished = threading.Event()
+            # PA chimes are a few tenths of a second. The stream callback reports
+            # "done" when the last samples are queued, which is before the device
+            # has played them. Wait for PortAudio's finished callback, and keep
+            # the stream open, so closing it does not discard the ding.
+            short_clip = effective_total / sample_rate <= 0.5
+
+            def _playback_finished() -> None:
+                playback_finished.set()
+
             with sd.OutputStream(
                 callback=stream_callback,
                 samplerate=sample_rate,
                 channels=1,
+                finished_callback=_playback_finished,
             ):
                 completed = completion_event.wait(max_timeout)
                 if not completed:
@@ -259,6 +279,14 @@ class SoundDeviceAudioIO(AudioIO):
                     stop_event.set()
                     interrupted = True
                     logger.debug("Audio playback timed out, forcing interruption")
+                if short_clip:
+                    # Stay open long enough for the device to play the queued samples
+                    # even if the finished callback is late. This is the PA-chime case.
+                    drain_timeout = effective_total / sample_rate + 0.25
+                    if not playback_finished.wait(drain_timeout):
+                        logger.warning("Short clip was queued but the device did not report playback finished.")
+                    elif not interrupted:
+                        time.sleep(0.05)
 
         except (sd.PortAudioError, RuntimeError):
             logger.debug("Audio stream already closed or invalid")
@@ -287,6 +315,9 @@ class SoundDeviceAudioIO(AudioIO):
         The active OutputStream callback will detect this on its next invocation
         and raise CallbackStop to cleanly terminate the stream.
         """
+        if self._is_playing and not self._playback_interruptible:
+            logger.debug("Ignoring stop_speaking during an uninterruptible notice chime.")
+            return
         if self._is_playing:
             self._stop_event.set()
             self._is_playing = False
