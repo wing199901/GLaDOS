@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 import pytest
 import soundfile as sf
 
-from glados.audio_io.sounddevice_io import fill_output_buffer
+from glados.audio_io.sounddevice_io import SoundDeviceAudioIO, fill_output_buffer, finalize_spoken_playback
 from glados.core.audio_data import SPEAKER_ANNOUNCER, SPEAKER_GLADOS, AudioMessage, tts_dialog_role
 from glados.core.conversation_store import ConversationStore
 from glados.core.engine import Glados, GladosConfig
@@ -55,12 +55,18 @@ class _IdentityConverter:
 
 
 class _FakeAudio:
-    def __init__(self, interrupts: list[bool] | None = None, hold: threading.Event | None = None) -> None:
+    def __init__(
+        self,
+        interrupts: list[bool] | None = None,
+        hold: threading.Event | None = None,
+        percentages: list[int] | None = None,
+    ) -> None:
         self.played: list[tuple[int | None, str]] = []
         self.clips: list[tuple[int | None, int]] = []
         self.interruptible_flags: list[bool] = []
         self.hold_during_start: list[bool] = []
         self._interrupts = list(interrupts or [])
+        self._percentages = list(percentages or [])
         self._hold = hold
 
     def start_speaking(
@@ -77,6 +83,8 @@ class _FakeAudio:
 
     def measure_percentage_spoken(self, total_samples: int, sample_rate: int | None = None) -> tuple[bool, int]:
         interrupted = self._interrupts.pop(0) if self._interrupts else False
+        if self._percentages:
+            return interrupted, self._percentages.pop(0)
         return interrupted, 0 if interrupted else 100
 
     def stop_speaking(self) -> None:
@@ -528,8 +536,11 @@ def _play_one(
     chime_tail_s: float = 0.0,
     hold: threading.Event | None = None,
     tts_muted: bool = False,
+    percentages: list[int] | None = None,
+    audio: _FakeAudio | None = None,
 ) -> tuple[_FakeAudio, queue.Queue[AudioMessage]]:
-    audio = _FakeAudio(interrupts, hold)
+    if audio is None:
+        audio = _FakeAudio(interrupts, hold, percentages)
     outgoing: queue.Queue[AudioMessage] = queue.Queue()
     shutdown = threading.Event()
     muted = threading.Event()
@@ -778,8 +789,9 @@ def test_notice_chime_logs_and_holds_the_mic(monkeypatch: pytest.MonkeyPatch) ->
     assert audio.interruptible_flags == [False, True, False]
     started = "PLAYING notice chime ding_on from models/SFX/ding_on.wav: 44100 Hz, 2 samples, 0.00s"
     assert started in messages
-    assert "PLAYED notice chime ding_on from models/SFX/ding_on.wav" in messages
-    assert "PLAYED notice chime ding_off from models/SFX/ding_off.wav" in messages
+    assert "PLAYED notice chime ding_on from models/SFX/ding_on.wav at 100%" in messages
+    assert "PLAYED notice chime ding_off from models/SFX/ding_off.wav at 100%" in messages
+    assert any(text.startswith("Notice playback starting:") and "notice=True" in text for text in messages)
     assert not hold.is_set()
 
 
@@ -876,3 +888,177 @@ def test_chime_hold_and_asr_mute_do_not_cut_playback() -> None:
     worker.join(timeout=2)
 
     assert muted_io.stopped == 0
+
+
+def test_announcer_speaker_chimes_even_when_notice_flag_is_false() -> None:
+    audio, _outgoing = _play_one(
+        AudioMessage(
+            audio=np.ones(4, dtype=np.float32),
+            text="System Operational.",
+            sample_rate=16000,
+            speaker=SPEAKER_ANNOUNCER,
+            notice=False,
+        ),
+        chime_on=_chime(2, 44100),
+        chime_off=_chime(3, 44100),
+    )
+
+    assert audio.clips == [(44100, 2), (16000, 4), (44100, 3)]
+
+
+def test_zero_percent_chime_is_not_logged_as_played() -> None:
+    messages: list[str] = []
+
+    def _sink(message: object) -> None:
+        record = getattr(message, "record", None)
+        if record is not None:
+            messages.append(str(record["message"]))
+
+    sink_id = logger.add(_sink, level="INFO")
+    try:
+        _play_one(
+            AudioMessage(
+                audio=np.ones(4, dtype=np.float32),
+                text="System Operational.",
+                sample_rate=16000,
+                notice=True,
+            ),
+            chime_on=_chime(2, 44100),
+            chime_off=_chime(3, 44100, "models/SFX/ding_off.wav"),
+            percentages=[0],
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert any(text.startswith("Notice chime produced no audio (ding_on)") for text in messages)
+    assert not any(text.startswith("PLAYED notice chime ding_on") for text in messages)
+    assert any(text.startswith("PLAYED notice chime ding_off") for text in messages)
+
+
+def test_player_uses_backend_chime_playback_when_the_device_provides_it() -> None:
+    class _RoutedAudio(_FakeAudio):
+        def __init__(self) -> None:
+            super().__init__()
+            self.routed: list[tuple[int | None, int]] = []
+
+        def play_notice_chime(
+            self,
+            audio_data: NDArray[np.float32],
+            sample_rate: int | None = None,
+        ) -> tuple[bool, int]:
+            self.routed.append((sample_rate, len(audio_data)))
+            return False, 100
+
+    routed = _RoutedAudio()
+    audio, _outgoing = _play_one(
+        AudioMessage(
+            audio=np.ones(4, dtype=np.float32),
+            text="System Operational.",
+            sample_rate=16000,
+            notice=True,
+        ),
+        chime_on=_chime(2, 44100),
+        chime_off=_chime(3, 44100),
+        audio=routed,
+    )
+
+    assert audio is routed
+    assert routed.routed == [(44100, 2), (44100, 3)]
+    assert audio.clips == [(16000, 4)]
+    assert audio.interruptible_flags == [True]
+
+
+def test_failed_chime_stream_is_not_reported_as_played() -> None:
+    assert finalize_spoken_playback(0, 8000, False, stream_failed=True, chime=True) == (True, 0)
+    assert finalize_spoken_playback(0, 8000, False, stream_failed=True, chime=False) == (False, 0)
+    assert finalize_spoken_playback(40, 80, False, stream_failed=False, chime=True) == (False, 50)
+
+
+def test_notice_chime_pauses_an_open_mic_and_retries_a_silent_callback() -> None:
+    io = SoundDeviceAudioIO.__new__(SoundDeviceAudioIO)
+    io._io_lock = threading.RLock()
+    io.input_stream = object()
+    io._pending_audio = None
+    io._pending_sample_rate = 44100
+    io._chime_mic_paused = False
+    events: list[object] = []
+
+    def stop_stream() -> None:
+        events.append("stop_mic")
+        io.input_stream = None
+
+    def open_stream() -> None:
+        events.append("start_mic")
+        io.input_stream = object()
+
+    def start_speaking(
+        audio_data: NDArray[np.float32],
+        sample_rate: int | None = None,
+        text: str = "",
+        interruptible: bool = True,
+    ) -> None:
+        events.append(("start", interruptible, len(audio_data)))
+        io._pending_audio = audio_data
+        io._pending_sample_rate = int(sample_rate or 0)
+
+    def measure(total_samples: int, sample_rate: int | None = None) -> tuple[bool, int]:
+        events.append(("measure", total_samples, io._chime_mic_paused))
+        return False, 0
+
+    def blocking(audio_data: NDArray[np.float32], sample_rate: int) -> tuple[bool, int]:
+        events.append(("blocking", sample_rate, len(audio_data)))
+        return False, 100
+
+    io._close_input_stream = stop_stream  # type: ignore[method-assign]
+    io._open_input_stream = open_stream  # type: ignore[method-assign]
+    io.start_speaking = start_speaking  # type: ignore[method-assign]
+    io.measure_percentage_spoken = measure  # type: ignore[method-assign]
+    io._blocking_chime_write = blocking  # type: ignore[method-assign]
+
+    clip = np.ones(8, dtype=np.float32)
+    interrupted, percentage = io.play_notice_chime(clip, 44100)
+
+    assert (interrupted, percentage) == (False, 100)
+    assert events == [
+        "stop_mic",
+        ("start", False, 8),
+        ("measure", 8, True),
+        ("blocking", 44100, 8),
+        "start_mic",
+    ]
+    assert io._chime_mic_paused is False
+
+
+def test_notice_chime_leaves_a_closed_mic_closed_when_the_callback_plays() -> None:
+    io = SoundDeviceAudioIO.__new__(SoundDeviceAudioIO)
+    io._io_lock = threading.RLock()
+    io.input_stream = None
+    io._pending_audio = None
+    io._pending_sample_rate = 44100
+    io._chime_mic_paused = False
+    events: list[object] = []
+
+    def start_speaking(
+        audio_data: NDArray[np.float32],
+        sample_rate: int | None = None,
+        text: str = "",
+        interruptible: bool = True,
+    ) -> None:
+        events.append("start")
+        io._pending_audio = audio_data
+        io._pending_sample_rate = int(sample_rate or 0)
+
+    def measure(total_samples: int, sample_rate: int | None = None) -> tuple[bool, int]:
+        events.append("measure")
+        return False, 100
+
+    io._close_input_stream = lambda: events.append("stop_mic")  # type: ignore[method-assign]
+    io._open_input_stream = lambda: events.append("start_mic")  # type: ignore[method-assign]
+    io.start_speaking = start_speaking  # type: ignore[method-assign]
+    io.measure_percentage_spoken = measure  # type: ignore[method-assign]
+    io._blocking_chime_write = lambda *_args: events.append("blocking")  # type: ignore[method-assign]
+
+    interrupted, percentage = io.play_notice_chime(np.ones(4, dtype=np.float32), 44100)
+
+    assert (interrupted, percentage) == (False, 100)
+    assert events == ["start", "measure"]
