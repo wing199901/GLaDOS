@@ -40,7 +40,6 @@ from .notice_chimes import (
     DEFAULT_NOTICE_CHIME_ON,
     NoticeChime,
     describe_notice_chime,
-    format_loaded_chimes,
     load_notice_chime,
 )
 from .context import ContextBuilder
@@ -944,14 +943,6 @@ class Glados:
         logger.success(
             "from_config notice chimes: "
             f"on={describe_notice_chime(notice_chime_on)} off={describe_notice_chime(notice_chime_off)}"
-        )
-        logger.success(
-            format_loaded_chimes(
-                notice_chime_on,
-                notice_chime_off,
-                config.notice_chime_on,
-                config.notice_chime_off,
-            )
         )
 
         audio_io = get_audio_system(

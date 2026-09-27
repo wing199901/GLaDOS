@@ -1,6 +1,5 @@
 """Local microphone and speaker backend implemented with sounddevice."""
 
-import math
 import queue
 import threading
 import time
@@ -49,18 +48,6 @@ def fill_output_buffer(
     chunk = min(frames, remaining)
     block[:chunk] = audio[position : position + chunk]
     return block, position + chunk, False, False
-
-
-def chime_stream_hold_s(latency: float) -> float:
-    """Keep a chime stream open after the callback copies the last frame.
-
-    ``measure_percentage_spoken`` returns 100 when every sample was written
-    into the PortAudio buffer. That is earlier than the speakers. Closing
-    the stream and opening the announcement on top of it drops the ding.
-    """
-    if math.isnan(latency) or latency < 0:
-        latency = 0.2
-    return min(0.70, max(0.35, latency))
 
 
 def finalize_spoken_playback(
@@ -248,7 +235,7 @@ class SoundDeviceAudioIO(AudioIO):
                     latency = float(stream.latency)
                 except (TypeError, ValueError):
                     latency = 0.2
-                time.sleep(chime_stream_hold_s(latency))
+                time.sleep(min(0.4, max(0.12, latency)))
         except (sd.PortAudioError, RuntimeError) as exc:
             logger.error(f"Notice chime blocking write failed: {exc}")
             return True, 0
@@ -416,12 +403,7 @@ class SoundDeviceAudioIO(AudioIO):
                         latency = float(stream.latency)
                     except (TypeError, ValueError):
                         latency = 0.2
-                    hold_s = chime_stream_hold_s(latency)
-                    logger.success(
-                        f"Holding notice chime output stream open for {hold_s:.2f}s "
-                        f"(device latency {latency:.2f}s) after the callback reached "
-                        f"{min(int(position / effective_total * 100), 100)}%."
-                    )
+                    hold_s = min(0.4, max(0.12, latency))
                     playback_finished.wait(hold_s)
                     time.sleep(hold_s)
                     if position > 0:

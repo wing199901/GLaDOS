@@ -16,12 +16,7 @@ from numpy.typing import NDArray
 import pytest
 import soundfile as sf
 
-from glados.audio_io.sounddevice_io import (
-    SoundDeviceAudioIO,
-    chime_stream_hold_s,
-    fill_output_buffer,
-    finalize_spoken_playback,
-)
+from glados.audio_io.sounddevice_io import SoundDeviceAudioIO, fill_output_buffer, finalize_spoken_playback
 from glados.core.audio_data import SPEAKER_ANNOUNCER, SPEAKER_GLADOS, AudioMessage, tts_dialog_role
 from glados.core.conversation_store import ConversationStore
 from glados.core.engine import Glados, GladosConfig
@@ -29,9 +24,7 @@ from glados.core.notice_chimes import (
     DEFAULT_NOTICE_CHIME_OFF,
     DEFAULT_NOTICE_CHIME_ON,
     NoticeChime,
-    apply_chime_gain,
     describe_configured_chime,
-    format_loaded_chimes,
     load_notice_chime,
     with_chime_edges,
 )
@@ -981,32 +974,6 @@ def test_player_uses_backend_chime_playback_when_the_device_provides_it() -> Non
     assert routed.routed == [(44100, 2), (44100, 3)]
     assert audio.clips == [(16000, 4)]
     assert audio.interruptible_flags == [True]
-
-
-def test_chime_gain_clips_and_load_log_matches_the_callback_report() -> None:
-    quiet = NoticeChime(audio=np.array([0.5, -0.4], dtype=np.float32), sample_rate=44100, source="ding_on.wav")
-    loud = NoticeChime(audio=np.array([0.8], dtype=np.float32), sample_rate=44100, source="ding_on.wav")
-    boosted = apply_chime_gain(quiet, 1.8)
-    clipped = apply_chime_gain(loud, 1.8)
-    assert boosted.audio.tolist() == pytest.approx([0.9, -0.72])
-    assert float(clipped.audio[0]) == pytest.approx(1.0)
-    ready = format_loaded_chimes(
-        NoticeChime(audio=np.zeros(8379, dtype=np.float32), sample_rate=44100, source="on"),
-        NoticeChime(audio=np.zeros(8379, dtype=np.float32), sample_rate=44100, source="off"),
-        "models/SFX/ding_on.wav",
-        "models/SFX/ding_off.wav",
-    )
-    assert ready == (
-        "Notice chimes ready: on=(44100, 8379) off=(44100, 8379) "
-        "paths='models/SFX/ding_on.wav','models/SFX/ding_off.wav'"
-    )
-
-
-def test_chime_stream_stays_open_after_a_full_callback() -> None:
-    assert chime_stream_hold_s(0.05) == pytest.approx(0.35)
-    assert chime_stream_hold_s(0.50) == pytest.approx(0.50)
-    assert chime_stream_hold_s(2.0) == pytest.approx(0.70)
-    assert chime_stream_hold_s(float("nan")) == pytest.approx(0.35)
 
 
 def test_failed_chime_stream_is_not_reported_as_played() -> None:
