@@ -50,6 +50,16 @@ def fill_output_buffer(
     return block, position + chunk, False, False
 
 
+def capture_should_yield_to_chime(is_playing: bool, interruptible: bool) -> bool:
+    """The mic callback should not run VAD while an uninterruptible chime is playing.
+
+    That callback and the speaker callback share the audio thread. A cold VAD
+    pass during startup is slow enough to starve a ~0.2s ding. The announcement
+    is long enough that the same stall only clips its start.
+    """
+    return is_playing and not interruptible
+
+
 def finalize_spoken_playback(
     position: int,
     total: int,
@@ -112,6 +122,10 @@ class SoundDeviceAudioIO(AudioIO):
         self._pending_audio: NDArray[np.float32] | None = None
         self._pending_sample_rate: int = self.SAMPLE_RATE
         self._playback_interruptible = True
+        # start_listening must not open the mic while an output stream is active.
+        # play_announcement() is queued before run(), so the first ding can already
+        # be in measure_percentage_spoken when the microphone opens.
+        self._device_lock = threading.RLock()
 
     def start_listening(self) -> None:
         """Start capturing audio from the system microphone.
@@ -124,6 +138,25 @@ class SoundDeviceAudioIO(AudioIO):
             RuntimeError: If the audio input stream cannot be started
             sd.PortAudioError: If there's an issue with the audio hardware
         """
+        announced_wait = False
+        waited = 0.0
+        while True:
+            if self._is_playing and waited < 8.0:
+                if not announced_wait:
+                    logger.success("Delaying microphone open until current playback finishes.")
+                    announced_wait = True
+                time.sleep(0.05)
+                waited += 0.05
+                continue
+            if self._is_playing:
+                logger.error("Opening the microphone while playback is still marked active.")
+            with self._device_lock:
+                if self._is_playing and waited < 8.0:
+                    continue
+                self._open_input_stream()
+                return
+
+    def _open_input_stream(self) -> None:
         if self.input_stream is not None:
             self.stop_listening()
 
@@ -149,6 +182,9 @@ class SoundDeviceAudioIO(AudioIO):
             if status:
                 # Log any errors for debugging
                 logger.debug(f"Audio callback status: {status}")
+
+            if capture_should_yield_to_chime(self._is_playing, self._playback_interruptible):
+                return
 
             data = np.array(indata).copy().squeeze()  # Reduce to single channel if necessary
             vad_value = self._vad_model(np.expand_dims(data, 0))
@@ -199,10 +235,22 @@ class SoundDeviceAudioIO(AudioIO):
             f"shape={getattr(audio_data, 'shape', None)} sr={sample_rate} "
             f"input_stream_open={self.input_stream is not None}"
         )
-        self.start_speaking(audio_data, sample_rate, interruptible=False)
-        prepared = self._pending_audio
-        prepared_rate = self._pending_sample_rate
-        interrupted, percentage = self.measure_percentage_spoken(len(audio_data), prepared_rate)
+        # Hold the device lock across queue + playback. play_announcement() runs
+        # before run() opens the mic, and opening an InputStream while this short
+        # OutputStream is active aborts the ding. Speech still follows.
+        with self._device_lock:
+            self.start_speaking(audio_data, sample_rate, interruptible=False)
+            prepared = self._pending_audio
+            prepared_rate = self._pending_sample_rate
+            interrupted, percentage = self.measure_percentage_spoken(len(audio_data), prepared_rate)
+        if percentage <= 0:
+            logger.success("Retrying notice chime after the output device settles.")
+            time.sleep(0.3)
+            with self._device_lock:
+                self.start_speaking(audio_data, sample_rate, interruptible=False)
+                prepared = self._pending_audio
+                prepared_rate = self._pending_sample_rate
+                interrupted, percentage = self.measure_percentage_spoken(len(audio_data), prepared_rate)
         if percentage <= 0:
             logger.error(
                 "Notice chime callback finished with no audible frames "
@@ -228,17 +276,22 @@ class SoundDeviceAudioIO(AudioIO):
             f"PLAYING notice chime with blocking write: {len(audio_data)} samples, {sample_rate} Hz, "
             f"{len(audio_data) / sample_rate:.2f}s"
         )
-        try:
-            with sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32") as stream:
-                stream.write(np.asarray(audio_data, dtype=np.float32).reshape(-1, 1))
-                try:
-                    latency = float(stream.latency)
-                except (TypeError, ValueError):
-                    latency = 0.2
-                time.sleep(min(0.4, max(0.12, latency)))
-        except (sd.PortAudioError, RuntimeError) as exc:
-            logger.error(f"Notice chime blocking write failed: {exc}")
-            return True, 0
+        with self._device_lock:
+            self._playback_interruptible = False
+            self._is_playing = True
+            try:
+                with sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32") as stream:
+                    stream.write(np.asarray(audio_data, dtype=np.float32).reshape(-1, 1))
+                    try:
+                        latency = float(stream.latency)
+                    except (TypeError, ValueError):
+                        latency = 0.2
+                    time.sleep(min(0.4, max(0.12, latency)))
+            except (sd.PortAudioError, RuntimeError) as exc:
+                logger.error(f"Notice chime blocking write failed: {exc}")
+                return True, 0
+            finally:
+                self._is_playing = False
         return False, 100
 
     def start_speaking(
@@ -269,32 +322,51 @@ class SoundDeviceAudioIO(AudioIO):
         if sample_rate is None:
             sample_rate = self.SAMPLE_RATE
 
+        # A second start_speaking during a chime used to flip interruptible back
+        # to True after stop_speaking returned, so the ding could be cut and the
+        # spoken line still played. Leave the chime in place.
+        if self._is_playing and not self._playback_interruptible:
+            logger.success("Ignoring start_speaking during an uninterruptible notice chime.")
+            return
+
         # Stop any existing playback and create a fresh stop event for this session
         self.stop_speaking()
         self._stop_event = threading.Event()
         self._playback_interruptible = interruptible
-
-        # Resample to the output device's native sample rate so PortAudio's
-        # low-quality built-in sample-rate converter is never used. This avoids
-        # the audible crackling/distortion that occurs when the TTS rate differs
-        # from the device rate (e.g. 22050 Hz TTS out, 44100 Hz device).
-        try:
-            device_rate = int(sd.query_devices(kind="output")["default_samplerate"])
-        except Exception as e:
-            device_rate = 0
-            logger.debug(f"Could not query output device sample rate: {e}")
-
-        if device_rate > 0 and sample_rate != device_rate:
-            logger.debug(f"Resampling audio {sample_rate} Hz -> {device_rate} Hz")
-            audio_data = resample_audio(audio_data, sample_rate, device_rate)
-            sample_rate = device_rate
-
-        logger.debug(f"Playing audio with sample rate: {sample_rate} Hz, length: {len(audio_data)} samples")
+        # Mark playback before the device query. run() can open the microphone
+        # while this clip is still being prepared, and that open aborts a ding.
         self._is_playing = True
-        self._pending_audio = audio_data
-        self._pending_sample_rate = sample_rate
+
+        try:
+            # Resample to the output device's native sample rate so PortAudio's
+            # low-quality built-in sample-rate converter is never used. This avoids
+            # the audible crackling/distortion that occurs when the TTS rate differs
+            # from the device rate (e.g. 22050 Hz TTS out, 44100 Hz device).
+            try:
+                device_rate = int(sd.query_devices(kind="output")["default_samplerate"])
+            except Exception as e:
+                device_rate = 0
+                logger.debug(f"Could not query output device sample rate: {e}")
+
+            if device_rate > 0 and sample_rate != device_rate:
+                logger.debug(f"Resampling audio {sample_rate} Hz -> {device_rate} Hz")
+                audio_data = resample_audio(audio_data, sample_rate, device_rate)
+                sample_rate = device_rate
+
+            logger.debug(f"Playing audio with sample rate: {sample_rate} Hz, length: {len(audio_data)} samples")
+            self._pending_audio = audio_data
+            self._pending_sample_rate = sample_rate
+        except Exception:
+            self._is_playing = False
+            self._pending_audio = None
+            raise
 
     def measure_percentage_spoken(self, total_samples: int, sample_rate: int | None = None) -> tuple[bool, int]:
+        """Play queued audio. Holds the device lock so the mic cannot open mid-clip."""
+        with self._device_lock:
+            return self._measure_percentage_spoken(total_samples, sample_rate)
+
+    def _measure_percentage_spoken(self, total_samples: int, sample_rate: int | None = None) -> tuple[bool, int]:
         """
         Play queued audio and monitor playback progress with interrupt detection.
 
@@ -455,7 +527,7 @@ class SoundDeviceAudioIO(AudioIO):
         and raise CallbackStop to cleanly terminate the stream.
         """
         if self._is_playing and not self._playback_interruptible:
-            logger.debug("Ignoring stop_speaking during an uninterruptible notice chime.")
+            logger.success("Ignoring stop_speaking during an uninterruptible notice chime.")
             return
         if self._is_playing:
             self._stop_event.set()

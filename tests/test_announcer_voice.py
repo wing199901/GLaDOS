@@ -16,7 +16,13 @@ from numpy.typing import NDArray
 import pytest
 import soundfile as sf
 
-from glados.audio_io.sounddevice_io import SoundDeviceAudioIO, fill_output_buffer, finalize_spoken_playback
+from glados.audio_io import sounddevice_io
+from glados.audio_io.sounddevice_io import (
+    SoundDeviceAudioIO,
+    capture_should_yield_to_chime,
+    fill_output_buffer,
+    finalize_spoken_playback,
+)
 from glados.core.audio_data import SPEAKER_ANNOUNCER, SPEAKER_GLADOS, AudioMessage, tts_dialog_role
 from glados.core.conversation_store import ConversationStore
 from glados.core.engine import Glados, GladosConfig
@@ -983,6 +989,7 @@ def test_notice_chime_keeps_the_input_stream_open_and_retries_silence() -> None:
     io = SoundDeviceAudioIO.__new__(SoundDeviceAudioIO)
     mic = object()
     io.input_stream = mic
+    io._device_lock = threading.RLock()
     io._pending_audio = None
     io._pending_sample_rate = 44100
     events: list[object] = []
@@ -1017,6 +1024,8 @@ def test_notice_chime_keeps_the_input_stream_open_and_retries_silence() -> None:
     assert events == [
         ("start", False, (8,)),
         ("measure", 8, True),
+        ("start", False, (8,)),
+        ("measure", 8, True),
         ("blocking", 44100, 8),
     ]
 
@@ -1025,6 +1034,7 @@ def test_notice_chime_callback_success_does_not_touch_the_mic() -> None:
     io = SoundDeviceAudioIO.__new__(SoundDeviceAudioIO)
     mic = object()
     io.input_stream = mic
+    io._device_lock = threading.RLock()
     io._pending_audio = None
     io._pending_sample_rate = 44100
     events: list[object] = []
@@ -1052,6 +1062,46 @@ def test_notice_chime_callback_success_does_not_touch_the_mic() -> None:
     assert (interrupted, percentage) == (False, 100)
     assert events == ["start", "measure"]
     assert io.input_stream is mic
+
+
+def test_start_speaking_during_chime_leaves_the_clip_in_place() -> None:
+    io = SoundDeviceAudioIO.__new__(SoundDeviceAudioIO)
+    pending = np.ones(4, dtype=np.float32)
+    io._is_playing = True
+    io._playback_interruptible = False
+    io._pending_audio = pending
+    io._pending_sample_rate = 44100
+
+    io.start_speaking(np.zeros(2, dtype=np.float32), 16000, interruptible=True)
+
+    assert io._is_playing is True
+    assert io._playback_interruptible is False
+    assert io._pending_audio is pending
+    assert io._pending_sample_rate == 44100
+
+
+def test_chime_playback_suppresses_mic_vad_and_mic_open_waits() -> None:
+    assert capture_should_yield_to_chime(True, False) is True
+    assert capture_should_yield_to_chime(True, True) is False
+    assert capture_should_yield_to_chime(False, False) is False
+
+    io = SoundDeviceAudioIO.__new__(SoundDeviceAudioIO)
+    io._is_playing = True
+    io._device_lock = threading.RLock()
+    opened: list[bool] = []
+
+    def _sleep(_seconds: float) -> None:
+        io._is_playing = False
+
+    io._open_input_stream = lambda: opened.append(io._is_playing)  # type: ignore[method-assign]
+    original_sleep = sounddevice_io.time.sleep
+    sounddevice_io.time.sleep = _sleep
+    try:
+        io.start_listening()
+    finally:
+        sounddevice_io.time.sleep = original_sleep
+
+    assert opened == [False]
 
 
 def test_cli_and_tui_both_pass_loaded_chimes_through_from_config() -> None:
