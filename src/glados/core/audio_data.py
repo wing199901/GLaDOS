@@ -32,6 +32,8 @@ class AudioMessage:
         ends_startup: True on the last startup line. Playback sets the
             microphone-open event only after this clip, including a GLaDOS
             follow-up that has no chimes.
+        playback_delay_s: Silence inserted before this clip. The startup
+            follow-up waits here, after ``ding_off``, before GLaDOS speaks.
     """
 
     audio: NDArray[np.float32]
@@ -41,6 +43,7 @@ class AudioMessage:
     speaker: str = SPEAKER_GLADOS
     notice: bool = False
     ends_startup: bool = False
+    playback_delay_s: float = 0.0
 
 
 def tts_dialog_role(meta: dict[str, Any] | None) -> str:

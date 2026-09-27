@@ -284,6 +284,7 @@ def test_shipped_config_uses_in_repo_announcer_path(monkeypatch: pytest.MonkeyPa
     assert not Path(loaded.notice_chime_on).is_absolute()
     assert loaded.notice_chime_off_after_interrupt is True
     assert loaded.announcement_followup == "Oh. It's you."
+    assert loaded.announcement_followup_delay_s == 1.0
 
 
 def test_relative_announcer_path_resolves_from_package_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -319,9 +320,15 @@ def test_build_tts_models_keeps_conversation_voice_and_loads_notice(
 
 
 class _AnnouncementHost:
-    def __init__(self, announcement: str | None, followup: str | None) -> None:
+    def __init__(
+        self,
+        announcement: str | None,
+        followup: str | None,
+        delay_s: float = 1.0,
+    ) -> None:
         self.announcement = announcement
         self.announcement_followup = followup
+        self.announcement_followup_delay_s = delay_s
         self.interruptible = True
         self.processing_active_event = threading.Event()
         self.startup_notice_done = threading.Event()
@@ -329,8 +336,12 @@ class _AnnouncementHost:
         self.tts_queue: queue.Queue[str | SpokenLine] = queue.Queue()
 
 
-def _announcement_host(announcement: str | None, followup: str | None) -> _AnnouncementHost:
-    return _AnnouncementHost(announcement, followup)
+def _announcement_host(
+    announcement: str | None,
+    followup: str | None,
+    delay_s: float = 1.0,
+) -> _AnnouncementHost:
+    return _AnnouncementHost(announcement, followup, delay_s)
 
 
 def test_play_announcement_is_a_notice_line() -> None:
@@ -359,9 +370,31 @@ def test_play_announcement_queues_glados_followup_after_the_notice() -> None:
         notice=True,
         ends_startup=False,
     )
-    assert host.tts_queue.get_nowait() == SpokenLine("Oh. It's you.", notice=False, ends_startup=True)
+    assert host.tts_queue.get_nowait() == SpokenLine(
+        "Oh. It's you.",
+        notice=False,
+        ends_startup=True,
+        playback_delay_s=1.0,
+    )
     assert host.tts_queue.empty()
     assert not host.startup_notice_done.is_set()
+
+
+def test_followup_delay_is_skipped_without_a_notice_or_when_set_to_zero() -> None:
+    no_notice = _announcement_host(None, "Oh. It's you.", delay_s=1.0)
+    Glados.play_announcement(no_notice)  # type: ignore[arg-type]
+    assert no_notice.tts_queue.get_nowait() == SpokenLine(
+        "Oh. It's you.",
+        notice=False,
+        ends_startup=True,
+        playback_delay_s=0.0,
+    )
+
+    zero_delay = _announcement_host("System Operational.", "Oh. It's you.", delay_s=0.0)
+    Glados.play_announcement(zero_delay)  # type: ignore[arg-type]
+    assert zero_delay.tts_queue.get_nowait().playback_delay_s == 0.0
+    followup = zero_delay.tts_queue.get_nowait()
+    assert followup == SpokenLine("Oh. It's you.", notice=False, ends_startup=True, playback_delay_s=0.0)
 
 
 def test_empty_announcement_followup_is_skipped() -> None:
@@ -477,7 +510,7 @@ def test_startup_line_uses_announcer_then_conversation_returns() -> None:
     worker = threading.Thread(target=synthesizer.run, daemon=True)
     worker.start()
     incoming.put(SpokenLine("All neural network modules are now loaded.", notice=True, ends_startup=False))
-    incoming.put(SpokenLine("Oh. It's you.", notice=False, ends_startup=True))
+    incoming.put(SpokenLine("Oh. It's you.", notice=False, ends_startup=True, playback_delay_s=1.0))
     incoming.put("The cake is a lie.")
 
     messages = _collect(outgoing, 3)
@@ -502,6 +535,9 @@ def test_startup_line_uses_announcer_then_conversation_returns() -> None:
     assert messages[0].ends_startup is False
     assert messages[1].ends_startup is True
     assert messages[2].ends_startup is False
+    assert messages[0].playback_delay_s == 0.0
+    assert messages[1].playback_delay_s == 1.0
+    assert messages[2].playback_delay_s == 0.0
     assert announcer.calls == ["All neural network modules are now loaded."]
     assert conversation.calls == ["Oh. It's you.", "The cake is a lie."]
 
@@ -807,6 +843,70 @@ def test_microphone_waits_until_the_glados_followup_finishes() -> None:
     assert audio.clips == [(44100, 2), (16000, 4), (44100, 3), (22050, 5)]
     play_events = [event for event in bus.snapshot() if event.kind == "play"]
     assert [tts_dialog_role(event.meta) for event in play_events] == ["Announcer", "GLaDOS"]
+
+
+def test_followup_waits_one_second_after_ding_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    audio = _FakeAudio()
+    done = threading.Event()
+    slept: list[float] = []
+    clips_at_delay: list[list[tuple[int | None, int]]] = []
+    mic_open_during_delay: list[bool] = []
+
+    def _sleep(seconds: float) -> None:
+        slept.append(seconds)
+        if seconds == 1.0:
+            clips_at_delay.append(list(audio.clips))
+            mic_open_during_delay.append(done.is_set())
+
+    monkeypatch.setattr("glados.core.speech_player.time.sleep", _sleep)
+    outgoing: queue.Queue[AudioMessage] = queue.Queue()
+    shutdown = threading.Event()
+    player = SpeechPlayer(
+        audio_io=audio,  # type: ignore[arg-type]
+        audio_output_queue=outgoing,
+        conversation_store=ConversationStore(),
+        tts_sample_rate=22050,
+        shutdown_event=shutdown,
+        currently_speaking_event=threading.Event(),
+        processing_active_event=threading.Event(),
+        pause_time=0.01,
+        chime_on=_chime(2, 44100),
+        chime_off=_chime(3, 44100, "models/SFX/ding_off.wav"),
+        chime_lead_s=0.0,
+        chime_tail_s=0.0,
+        chime_gap_s=0.0,
+        startup_notice_done=done,
+    )
+    outgoing.put(
+        AudioMessage(
+            audio=np.ones(4, dtype=np.float32),
+            text="System Operational.",
+            sample_rate=16000,
+            speaker=SPEAKER_ANNOUNCER,
+            notice=True,
+        )
+    )
+    outgoing.put(
+        AudioMessage(
+            audio=np.ones(5, dtype=np.float32),
+            text="Oh. It's you.",
+            sample_rate=22050,
+            speaker=SPEAKER_GLADOS,
+            ends_startup=True,
+            playback_delay_s=1.0,
+        )
+    )
+    worker = threading.Thread(target=player.run, daemon=True)
+    worker.start()
+    assert done.wait(2.0)
+    shutdown.set()
+    worker.join(timeout=2)
+
+    assert slept.count(1.0) == 1
+    assert clips_at_delay == [[(44100, 2), (16000, 4), (44100, 3)]]
+    assert mic_open_during_delay == [False]
+    assert audio.clips == [(44100, 2), (16000, 4), (44100, 3), (22050, 5)]
+    assert done.is_set()
 
 
 def test_interrupted_notice_still_plays_the_startup_followup() -> None:

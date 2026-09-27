@@ -168,6 +168,13 @@ class SpeechPlayer:
                         finally:
                             self._release_chime()
 
+                    if audio_msg.playback_delay_s > 0:
+                        logger.success(
+                            f"Waiting {audio_msg.playback_delay_s:.2f}s after the notice "
+                            "before the startup follow-up."
+                        )
+                        time.sleep(audio_msg.playback_delay_s)
+
                     self.audio_io.start_speaking(audio_msg.audio, playback_rate)
                     logger.success(f"TTS text: {audio_msg.text}")
                     interrupted, percentage_played = self.audio_io.measure_percentage_spoken(

@@ -139,6 +139,9 @@ class GladosConfig(BaseModel):
     # No Announcer model and no PA chimes. Empty or missing skips the line.
     # Personal/local fun only; edit the string freely. speak_notice does not append it.
     announcement_followup: str | None = None
+    # Silence after ding_off, before announcement_followup. The microphone stays
+    # closed through this pause. Ignored when the follow-up line is empty.
+    announcement_followup_delay_s: float = 1.0
     llm_headers: dict[str, str] | None = None
     tui_theme: str | None = None
     personality_preprompt: list[PersonalityPrompt]
@@ -307,6 +310,7 @@ class Glados:
         wake_word: str | None = None,
         announcement: str | None = None,
         announcement_followup: str | None = None,
+        announcement_followup_delay_s: float = 1.0,
         personality_preprompt: tuple[dict[str, str], ...] = DEFAULT_PERSONALITY_PREPROMPT,
         tool_config: dict[str, Any] | None = None,
         tool_timeout: float = 30.0,
@@ -350,6 +354,8 @@ class Glados:
             announcement_followup (str | None): Optional second startup line. Spoken
                 with the conversation voice after the notice and ding_off, with no
                 PA chimes. Empty skips it. ``speak_notice`` does not append it.
+            announcement_followup_delay_s: Silence after ding_off before that
+                follow-up. The microphone stays closed during the pause.
             personality_preprompt (tuple[dict[str, str], ...]): Initial personality preprompt messages.
             tool_config (dict[str, Any] | None): Configuration for tools (e.g., audio paths).
             tool_timeout (float): Timeout in seconds for tool execution.
@@ -374,6 +380,7 @@ class Glados:
         self.wake_word = wake_word
         self.announcement = announcement
         self.announcement_followup = announcement_followup
+        self.announcement_followup_delay_s = announcement_followup_delay_s
         self.tool_config = tool_config or {}
         self.tool_timeout = tool_timeout
         self.mcp_servers = mcp_servers or []
@@ -933,7 +940,8 @@ class Glados:
         for line in lines:
             logger.success(
                 "Queueing startup SpokenLine: "
-                f"notice={line.notice} ends_startup={line.ends_startup} text={line.text!r}"
+                f"notice={line.notice} ends_startup={line.ends_startup} "
+                f"playback_delay_s={line.playback_delay_s} text={line.text!r}"
             )
             self.tts_queue.put(line)
         self.processing_active_event.set()
@@ -952,11 +960,18 @@ class Glados:
         if notice:
             lines.append(SpokenLine(notice, notice=True))
         if followup:
-            lines.append(SpokenLine(followup, notice=False))
+            # Pause only after a notice. A follow-up with no ding_off starts immediately.
+            delay_s = max(0.0, float(self.announcement_followup_delay_s)) if notice else 0.0
+            lines.append(SpokenLine(followup, notice=False, playback_delay_s=delay_s))
         if not lines:
             return lines
         last = lines[-1]
-        lines[-1] = SpokenLine(last.text, notice=last.notice, ends_startup=True)
+        lines[-1] = SpokenLine(
+            last.text,
+            notice=last.notice,
+            ends_startup=True,
+            playback_delay_s=last.playback_delay_s,
+        )
         return lines
 
     def speak_notice(self, text: str) -> None:
@@ -1028,6 +1043,7 @@ class Glados:
                 wake_word=config.wake_word,
                 announcement=config.announcement,
                 announcement_followup=config.announcement_followup,
+                announcement_followup_delay_s=config.announcement_followup_delay_s,
                 personality_preprompt=tuple(config.to_chat_messages()),
                 tool_config={"slow_clap_audio_path": config.slow_clap_audio_path},
                 tool_timeout=config.tool_timeout,
