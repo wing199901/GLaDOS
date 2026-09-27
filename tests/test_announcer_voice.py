@@ -19,7 +19,7 @@ import soundfile as sf
 from glados.audio_io.sounddevice_io import SoundDeviceAudioIO, fill_output_buffer, finalize_spoken_playback
 from glados.core.audio_data import SPEAKER_ANNOUNCER, SPEAKER_GLADOS, AudioMessage, tts_dialog_role
 from glados.core.conversation_store import ConversationStore
-from glados.core.engine import Glados, GladosConfig
+from glados.core.engine import Glados, GladosConfig, wait_for_startup_notice
 from glados.core.notice_chimes import (
     DEFAULT_NOTICE_CHIME_OFF,
     DEFAULT_NOTICE_CHIME_ON,
@@ -323,6 +323,8 @@ def test_play_announcement_is_a_notice_line() -> None:
             self.announcement = "All neural network modules are now loaded. System Operational."
             self.interruptible = True
             self.processing_active_event = threading.Event()
+            self.startup_notice_done = threading.Event()
+            self.startup_notice_done.set()
             self.tts_queue: queue.Queue[str | SpokenLine] = queue.Queue()
 
     host = _Host()
@@ -331,6 +333,56 @@ def test_play_announcement_is_a_notice_line() -> None:
 
     assert item == SpokenLine(host.announcement, notice=True)
     assert host.processing_active_event.is_set()
+    assert not host.startup_notice_done.is_set()
+
+
+def test_wait_for_startup_notice_returns_when_the_announcement_already_finished() -> None:
+    done = threading.Event()
+    done.set()
+
+    assert wait_for_startup_notice(done, 0.01) is True
+
+
+def test_wait_for_startup_notice_waits_until_the_announcement_finishes() -> None:
+    done = threading.Event()
+    messages: list[str] = []
+
+    def _sink(message: object) -> None:
+        record = getattr(message, "record", None)
+        if record is not None:
+            messages.append(str(record["message"]))
+
+    def _release() -> None:
+        time.sleep(0.05)
+        done.set()
+
+    sink_id = logger.add(_sink, level="SUCCESS")
+    try:
+        threading.Thread(target=_release, daemon=True).start()
+        assert wait_for_startup_notice(done, 2.0) is True
+    finally:
+        logger.remove(sink_id)
+
+    assert any("Waiting for the startup announcement before opening the microphone." == text for text in messages)
+    assert any("Startup announcement finished. Opening the microphone." == text for text in messages)
+
+
+def test_wait_for_startup_notice_opens_the_microphone_after_timeout() -> None:
+    done = threading.Event()
+    messages: list[str] = []
+
+    def _sink(message: object) -> None:
+        record = getattr(message, "record", None)
+        if record is not None:
+            messages.append(str(record["message"]))
+
+    sink_id = logger.add(_sink, level="ERROR")
+    try:
+        assert wait_for_startup_notice(done, 0.05) is False
+    finally:
+        logger.remove(sink_id)
+
+    assert any("Startup announcement did not finish. Opening the microphone anyway." == text for text in messages)
 
 
 def test_speak_notice_queues_announcer_line_and_ignores_blank() -> None:
@@ -536,6 +588,7 @@ def _play_one(
     chime_lead_s: float = 0.0,
     chime_tail_s: float = 0.0,
     hold: threading.Event | None = None,
+    startup_notice_done: threading.Event | None = None,
     tts_muted: bool = False,
     percentages: list[int] | None = None,
     audio: _FakeAudio | None = None,
@@ -564,6 +617,7 @@ def _play_one(
         chime_lead_s=chime_lead_s,
         chime_tail_s=chime_tail_s,
         chime_gap_s=chime_gap_s,
+        startup_notice_done=startup_notice_done,
     )
     outgoing.put(message)
     for item in extra or []:
@@ -595,6 +649,66 @@ def test_notice_line_plays_chime_speech_chime() -> None:
 
     assert audio.clips == [(44100, 2), (16000, 4), (44100, 3)]
     assert audio.interruptible_flags == [False, True, False]
+
+
+def test_startup_notice_done_is_set_after_ding_off() -> None:
+    audio = _FakeAudio()
+    done = threading.Event()
+    flags_at_set: list[list[bool]] = []
+    original_set = done.set
+
+    def _set() -> None:
+        flags_at_set.append(list(audio.interruptible_flags))
+        original_set()
+
+    done.set = _set  # type: ignore[method-assign]
+    outgoing: queue.Queue[AudioMessage] = queue.Queue()
+    shutdown = threading.Event()
+    player = SpeechPlayer(
+        audio_io=audio,  # type: ignore[arg-type]
+        audio_output_queue=outgoing,
+        conversation_store=ConversationStore(),
+        tts_sample_rate=22050,
+        shutdown_event=shutdown,
+        currently_speaking_event=threading.Event(),
+        processing_active_event=threading.Event(),
+        pause_time=0.01,
+        chime_on=_chime(2, 44100),
+        chime_off=_chime(3, 44100, "models/SFX/ding_off.wav"),
+        chime_lead_s=0.0,
+        chime_tail_s=0.0,
+        chime_gap_s=0.0,
+        startup_notice_done=done,
+    )
+    outgoing.put(
+        AudioMessage(
+            audio=np.ones(4, dtype=np.float32),
+            text="System Operational.",
+            sample_rate=16000,
+            notice=True,
+        )
+    )
+    worker = threading.Thread(target=player.run, daemon=True)
+    worker.start()
+    assert done.wait(2.0)
+    shutdown.set()
+    worker.join(timeout=2)
+
+    assert flags_at_set == [[False, True, False]]
+    assert audio.clips == [(44100, 2), (16000, 4), (44100, 3)]
+
+
+def test_conversation_line_does_not_finish_the_startup_notice() -> None:
+    done = threading.Event()
+    audio, _outgoing = _play_one(
+        AudioMessage(audio=np.ones(4, dtype=np.float32), text="The cake is a lie.", sample_rate=22050),
+        chime_on=_chime(2, 44100),
+        chime_off=_chime(3, 44100),
+        startup_notice_done=done,
+    )
+
+    assert audio.clips == [(22050, 4)]
+    assert not done.is_set()
 
 
 def test_conversation_line_skips_chimes() -> None:
@@ -1118,3 +1232,6 @@ def test_cli_and_tui_both_pass_loaded_chimes_through_from_config() -> None:
     assert "notice_chime_off=notice_chime_off" in engine_source
     assert "chime_on=self._notice_chime_on" in engine_source
     assert "chime_off=self._notice_chime_off" in engine_source
+    wait_at = engine_source.index("wait_for_startup_notice(self.startup_notice_done")
+    listen_at = engine_source.index("self.audio_io.start_listening()")
+    assert wait_at < listen_at

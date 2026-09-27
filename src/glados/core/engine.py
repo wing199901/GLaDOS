@@ -252,6 +252,25 @@ class GladosConfig(BaseModel):
         return [prompt.to_chat_message() for prompt in self.personality_preprompt]
 
 
+def wait_for_startup_notice(done: threading.Event, timeout: float) -> bool:
+    """Wait until the startup notice has finished, then let the microphone open.
+
+    The first output stream opened while the input stream is already up can be
+    swallowed for the length of a ~0.2s ding. The announcement and ding_off are
+    long enough to survive that. Opening the microphone after ding_off keeps
+    ding_on ahead of that warmup.
+    """
+    if done.is_set():
+        return True
+    logger.success("Waiting for the startup announcement before opening the microphone.")
+    finished = done.wait(timeout)
+    if finished:
+        logger.success("Startup announcement finished. Opening the microphone.")
+    else:
+        logger.error("Startup announcement did not finish. Opening the microphone anyway.")
+    return finished
+
+
 class Glados:
     """
     Glados voice assistant orchestrator.
@@ -262,6 +281,8 @@ class Glados:
     """
 
     PAUSE_TIME: float = 0.05  # Time to wait between processing loops
+    # First TTS of the announcement can be slow. After this, open the mic anyway.
+    STARTUP_NOTICE_WAIT_S: float = 60.0
     NEUROTOXIN_RELEASE_ALLOWED: bool = False  # preparation for function calling, see issue #13
     DEFAULT_PERSONALITY_PREPROMPT: tuple[dict[str, str], ...] = (
         {
@@ -391,6 +412,10 @@ class Glados:
         self.currently_speaking_event = threading.Event()  # Indicates if the assistant is currently speaking
         # Set while a notice chime is playing so the mic does not treat it as the user.
         self.notice_chime_hold_event = threading.Event()
+        # Set until play_announcement queues the startup notice. run() waits for the
+        # player to set it again so the microphone opens after ding_on, not during it.
+        self.startup_notice_done = threading.Event()
+        self.startup_notice_done.set()
         self.shutdown_event = threading.Event()  # Event to signal shutdown of all threads
 
         # Initialize shutdown orchestrator for graceful shutdown
@@ -601,6 +626,7 @@ class Glados:
             chime_off=self._notice_chime_off,
             chime_off_after_interrupt=self._notice_chime_off_after_interrupt,
             chime_hold_event=self.notice_chime_hold_event,
+            startup_notice_done=self.startup_notice_done,
         )
 
         self.vision_processor = None
@@ -894,6 +920,8 @@ class Glados:
             logger.success(
                 f"Queueing announcement SpokenLine: notice={line.notice} text={line.text!r}"
             )
+            # Clear before the queue put so run() cannot miss a fast playback.
+            self.startup_notice_done.clear()
             self.tts_queue.put(line)
             self.processing_active_event.set()
 
@@ -1031,6 +1059,7 @@ class Glados:
         This method is the main entry point for running the Glados voice assistant.
         """
         if self.input_mode in {"audio", "both"}:
+            wait_for_startup_notice(self.startup_notice_done, self.STARTUP_NOTICE_WAIT_S)
             try:
                 self.audio_io.start_listening()
                 logger.success("Audio input stream started successfully")

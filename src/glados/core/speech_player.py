@@ -47,6 +47,7 @@ class SpeechPlayer:
         chime_lead_s: float = DEFAULT_CHIME_LEAD_S,
         chime_tail_s: float = DEFAULT_CHIME_TAIL_S,
         chime_gap_s: float = DEFAULT_CHIME_GAP_S,
+        startup_notice_done: threading.Event | None = None,
     ) -> None:
         self.audio_io = audio_io
         self.audio_output_queue = audio_output_queue
@@ -63,6 +64,7 @@ class SpeechPlayer:
         self._chime_off = chime_off
         self._chime_off_after_interrupt = chime_off_after_interrupt
         self._chime_hold_event = chime_hold_event
+        self._startup_notice_done = startup_notice_done
         self._chime_lead_s = chime_lead_s
         self._chime_tail_s = chime_tail_s
         self._chime_gap_s = chime_gap_s
@@ -79,6 +81,7 @@ class SpeechPlayer:
 
         logger.info("AudioPlayer thread started.")
         while not self.shutdown_event.is_set():
+            audio_msg = None
             try:
                 audio_msg = self.audio_output_queue.get(timeout=self.pause_time)
 
@@ -129,6 +132,7 @@ class SpeechPlayer:
                     else:
                         logger.warning(f"AudioPlayer: Received empty audio message or no text: {audio_len, audio_msg}")
                     self.currently_speaking_event.clear()
+                    self._finish_startup_notice(audio_msg)
                     continue
 
                 playback_rate = audio_msg.sample_rate or self.tts_sample_rate
@@ -221,15 +225,18 @@ class SpeechPlayer:
                         )
 
                     self.currently_speaking_event.clear()
-    
+                    self._finish_startup_notice(audio_msg)
+
                 else:
                     logger.warning(f"AudioPlayer: Received empty audio message or no text: {audio_len, audio_msg}")
+                    self._finish_startup_notice(audio_msg)
 
             except queue.Empty:
                 pass  # No audio to play right now
 
             except Exception as e:
                 logger.exception(f"AudioPlayer: Unexpected error in run loop: {e}")
+                self._finish_startup_notice(audio_msg)
                 time.sleep(self.pause_time)  # small sleep here to prevent tight loop on persistent error
         logger.info("AudioPlayer thread finished.")
 
@@ -295,6 +302,14 @@ class SpeechPlayer:
             return play_chime(playback.audio, playback.sample_rate)
         self.audio_io.start_speaking(playback.audio, playback.sample_rate, interruptible=False)
         return self.audio_io.measure_percentage_spoken(len(playback.audio), playback.sample_rate)
+
+    def _finish_startup_notice(self, audio_msg: AudioMessage | None) -> None:
+        """Let run() open the microphone after this notice, including ding_off."""
+        if audio_msg is None or audio_msg.is_eos or self._startup_notice_done is None:
+            return
+        if not self._uses_notice_chimes(audio_msg):
+            return
+        self._startup_notice_done.set()
 
     def _hold_chime(self) -> None:
         """Keep the mic from treating this chime as the user talking."""
