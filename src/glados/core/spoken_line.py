@@ -16,7 +16,7 @@ class SpokenLine:
     conversation lines leave it false.
 
     ``playback_delay_s`` is silence before this line starts. The startup
-    follow-up uses it so GLaDOS waits after ``ding_off``.
+    follow-up uses it so GLaDOS waits after the notice.
     """
 
     text: str

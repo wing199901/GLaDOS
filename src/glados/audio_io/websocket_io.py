@@ -144,7 +144,6 @@ class WebsocketAudioIO(AudioIO):
         # if audio is currently playing
         self._is_playing = False
         self._stop_playback = False
-        self._playback_interruptible = True
         # set by playback thread when playback is finished
         self._playback_finished_event = threading.Event()
         # audio payload data with lock
@@ -227,7 +226,6 @@ class WebsocketAudioIO(AudioIO):
         sample_rate: int | None = None,
         text: str = "",
         wait: bool = False,
-        interruptible: bool = True,
     ) -> None:
         """Play audio through the system speakers.
 
@@ -244,13 +242,8 @@ class WebsocketAudioIO(AudioIO):
             sample_rate = self.SAMPLE_RATE
 
         if self._is_playing:
-            # Stop any existing playback and wait for finish, using the previous
-            # clip's interruptible flag. A new uninterruptible chime must not
-            # block stopping whatever was already playing.
             self.stop_speaking()
             self._playback_finished_event.wait(timeout=2.0)
-
-        self._playback_interruptible = interruptible
 
         # Playback is finished
         self._playback_finished_event.clear()
@@ -345,9 +338,6 @@ class WebsocketAudioIO(AudioIO):
         """
         logger.debug("Stopping speaker...")
         with self._audio_lock:
-            if not self._playback_interruptible:
-                logger.debug("Ignoring stop_speaking during an uninterruptible notice chime.")
-                return
             self._stop_playback = True
 
     def get_sample_queue(self) -> queue.Queue[tuple[NDArray[np.float32], bool]]:

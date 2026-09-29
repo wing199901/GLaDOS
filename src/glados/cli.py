@@ -11,7 +11,6 @@ from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn
 import sounddevice as sd  # type: ignore
 
 from .core.engine import Glados, GladosConfig
-from .core.notice_chimes import describe_configured_chime
 from .TTS import tts_glados
 from .TTS.announcer import AnnouncerVoiceUnavailableError, require_announcer_voice
 from .utils import spoken_text_converter as stc
@@ -189,8 +188,7 @@ def say(
             Defaults to "glados_config.yaml". Used when ``announcer`` is true so
             ``announcer_model_path`` and ``GLADOS_ANNOUNCER_MODEL`` apply.
         announcer: Speak with the local Announcer Piper model instead of GLaDOS.
-            A missing model returns 1 and does not fall back. This path is plain
-            speech: it does not play PA chimes.
+            A missing model returns 1 and does not fall back.
 
     Notes:
         - Converts input text with SpokenTextConverter before synthesis
@@ -219,7 +217,6 @@ def say(
     # Generate the audio to from the text
     audio = glados_tts.generate_speech_audio(converted_text)
 
-    # Play the audio. No notice chimes: this is a one-shot TTS check.
     sd.play(audio, glados_tts.sample_rate)
     sd.wait()
     return 0
@@ -228,11 +225,8 @@ def say(
 def log_cli_start(config: GladosConfig, config_path: str | Path | list[str] | list[Path]) -> None:
     """Log the ``glados start`` entry. This command does not launch the TUI.
 
-    ``uv run`` loads a project ``.env`` before the process starts. A Python
-    repro that calls ``from_config`` directly does not, so an empty
-    ``GLADOS_NOTICE_CHIME_ON`` or ``GLADOS_NOTICE_CHIME_OFF`` silences only
-    the CLI. The module paths show whether ``uv run glados`` imported this
-    checkout or a different install.
+    The module paths show whether ``uv run glados`` imported this checkout
+    or a different install.
     """
     engine_file = sys.modules[Glados.__module__].__file__
     logger.success(
@@ -241,9 +235,7 @@ def log_cli_start(config: GladosConfig, config_path: str | Path | list[str] | li
         f"cwd={Path.cwd()} package_root={get_package_root()} config={config_path!r}"
     )
     logger.success(
-        "glados start chimes: "
-        f"{describe_configured_chime('on', config.notice_chime_on, 'GLADOS_NOTICE_CHIME_ON')} "
-        f"{describe_configured_chime('off', config.notice_chime_off, 'GLADOS_NOTICE_CHIME_OFF')} "
+        "glados start: "
         f"asr_muted={config.asr_muted} tts_enabled={config.tts_enabled} "
         f"announcement={config.announcement!r} announcement_followup={config.announcement_followup!r}"
     )
@@ -450,7 +442,7 @@ def main() -> int:
         help=(
             "Speak with the local Announcer Piper model from announcer_model_path "
             "(or GLADOS_ANNOUNCER_MODEL). Uses that model's announcer.onnx.json settings, "
-            "including length_scale. Fails if the model cannot be loaded. Does not play PA chimes."
+            "including length_scale. Fails if the model cannot be loaded."
         ),
     )
     parser_add_config(say_parser)

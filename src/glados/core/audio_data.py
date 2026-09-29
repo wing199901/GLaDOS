@@ -27,13 +27,12 @@ class AudioMessage:
         speaker: Name shown in the TUI for this line. Notice lines that were
             actually synthesized with the Announcer model use ``Announcer``.
             A missing Announcer model keeps ``GLaDOS``.
-        notice: True for startup and ``speak_notice`` lines. PA chimes follow
-            this flag even when the voice falls back to GLaDOS.
+        notice: True for startup and ``speak_notice`` lines.
         ends_startup: True on the last startup line. Playback sets the
             microphone-open event only after this clip, including a GLaDOS
-            follow-up that has no chimes.
+            follow-up.
         playback_delay_s: Silence inserted before this clip. The startup
-            follow-up waits here, after ``ding_off``, before GLaDOS speaks.
+            follow-up waits here, after the notice, before GLaDOS speaks.
     """
 
     audio: NDArray[np.float32]

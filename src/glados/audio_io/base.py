@@ -34,7 +34,6 @@ class AudioIO(ABC):
         audio_data: NDArray[np.float32],
         sample_rate: int | None = None,
         text: str = "",
-        interruptible: bool = True,
     ) -> None:
         """Queue audio for playback (non-blocking)."""
 

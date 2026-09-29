@@ -11,7 +11,7 @@ def find_project_root(start: Path) -> Path | None:
     A source tree is ``.../GLaDOS/src/glados/...``. An installed copy is
     ``.../GLaDOS/.venv/.../site-packages/glados/...``. Counting a fixed number
     of parents lands in ``site-packages`` or ``Lib`` for the install, so
-    ``models/SFX`` misses while ``glados start`` still finds ``models/`` from
+    model files miss while ``glados start`` still finds ``models/`` from
     the working directory.
     """
     for candidate in (start, *start.parents):
@@ -52,7 +52,7 @@ def resolve_repo_path(path_value: str) -> Path:
     if rooted.is_file():
         return rooted
     # `glados start` checks model files from the working directory. A relative
-    # chime that is missing at the package root is still audible from there.
+    # file that is missing at the package root can still be found there.
     from_cwd = Path.cwd() / expanded
     if from_cwd.is_file():
         logger.success(

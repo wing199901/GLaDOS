@@ -35,13 +35,6 @@ from ..observability import MindRegistry, ObservabilityBus, trim_message
 from ..vision import VisionConfig, VisionState
 from ..vision.constants import SYSTEM_PROMPT_VISION_HANDLING
 from .audio_data import AudioMessage
-from .notice_chimes import (
-    DEFAULT_NOTICE_CHIME_OFF,
-    DEFAULT_NOTICE_CHIME_ON,
-    NoticeChime,
-    describe_notice_chime,
-    load_notice_chime,
-)
 from .context import ContextBuilder
 from .audio_state import AudioState
 from .conversation_store import ConversationStore
@@ -127,20 +120,13 @@ class GladosConfig(BaseModel):
     # Relative repo path, same idea as models/TTS/glados.onnx. The ONNX and sidecar
     # are a local drop-in; a missing file keeps notice lines on `voice`.
     announcer_model_path: str | None = DEFAULT_ANNOUNCER_MODEL
-    # Local PA chimes around notice lines (startup announcement and speak_notice).
-    # Copy ding_on.wav and ding_off.wav into models/SFX/. Missing files are skipped.
-    # Do not commit those wavs. Conversation lines never play them.
-    notice_chime_on: str | None = DEFAULT_NOTICE_CHIME_ON
-    notice_chime_off: str | None = DEFAULT_NOTICE_CHIME_OFF
-    # Mic echo often interrupts the notice speech. Still play ding_off unless this is false.
-    notice_chime_off_after_interrupt: bool = True
     announcement: str | None
-    # Spoken by the conversation voice (`voice`) after the startup notice and ding_off.
-    # No Announcer model and no PA chimes. Empty or missing skips the line.
+    # Spoken by the conversation voice (`voice`) after the startup notice.
+    # No Announcer model. Empty or missing skips the line.
     # Personal/local fun only; edit the string freely. speak_notice does not append it.
     announcement_followup: str | None = None
-    # Silence after ding_off, before announcement_followup. The microphone stays
-    # closed through this pause. Ignored when the follow-up line is empty.
+    # Silence after the startup notice, before announcement_followup. The microphone
+    # stays closed through this pause. Ignored when the follow-up line is empty.
     announcement_followup_delay_s: float = 1.0
     llm_headers: dict[str, str] | None = None
     tui_theme: str | None = None
@@ -171,22 +157,6 @@ class GladosConfig(BaseModel):
         if env_path is not None:
             stripped = env_path.strip()
             self.announcer_model_path = stripped or None
-        return self
-
-    @model_validator(mode="after")
-    def _apply_notice_chime_env(self) -> "GladosConfig":
-        """Let GLADOS_NOTICE_CHIME_ON and GLADOS_NOTICE_CHIME_OFF override the YAML paths.
-
-        An empty value disables that chime. Unset variables leave the config path in place.
-        """
-        for env_name, field_name in (
-            ("GLADOS_NOTICE_CHIME_ON", "notice_chime_on"),
-            ("GLADOS_NOTICE_CHIME_OFF", "notice_chime_off"),
-        ):
-            env_path = os.environ.get(env_name)
-            if env_path is not None:
-                stripped = env_path.strip()
-                setattr(self, field_name, stripped or None)
         return self
 
     @classmethod
@@ -262,10 +232,8 @@ class GladosConfig(BaseModel):
 def wait_for_startup_notice(done: threading.Event, timeout: float) -> bool:
     """Wait until the startup lines have finished, then let the microphone open.
 
-    The first output stream opened while the input stream is already up can be
-    swallowed for the length of a ~0.2s ding. The announcement, ding_off, and
-    an optional GLaDOS follow-up are long enough to survive that. Opening the
-    microphone after the last of those lines keeps ding_on ahead of that warmup.
+    Opening the microphone after the last startup line keeps that speech from
+    being the first output while the input stream is already up.
     """
     if done.is_set():
         return True
@@ -322,9 +290,6 @@ class Glados:
         asr_muted: bool = False,
         llm_headers: dict[str, str] | None = None,
         notice_tts_model: SpeechSynthesizerProtocol | None = None,
-        notice_chime_on: NoticeChime | None = None,
-        notice_chime_off: NoticeChime | None = None,
-        notice_chime_off_after_interrupt: bool = True,
     ) -> None:
         """
         Initialize the Glados voice assistant with configuration parameters.
@@ -340,11 +305,6 @@ class Glados:
             audio_io (AudioProtocol): The audio input/output system to use.
             notice_tts_model: Optional second Piper model for the startup announcement and
                 other short notice lines. Missing means those lines use ``tts_model``.
-            notice_chime_on: Optional ding played before a notice line. Missing skips it.
-            notice_chime_off: Optional ding played after a notice line. Missing skips it.
-                Still played when the speech was interrupted, unless
-                ``notice_chime_off_after_interrupt`` is false.
-            notice_chime_off_after_interrupt: Play ding_off after an interrupted notice.
             completion_url (HttpUrl): The URL for the LLM completion endpoint.
             llm_model (str): The name of the LLM model to use.
             api_key (str | None): API key for accessing the LLM service, if required.
@@ -352,9 +312,9 @@ class Glados:
             wake_word (str | None): Optional wake word to trigger the assistant.
             announcement (str | None): Optional announcement to play on startup.
             announcement_followup (str | None): Optional second startup line. Spoken
-                with the conversation voice after the notice and ding_off, with no
-                PA chimes. Empty skips it. ``speak_notice`` does not append it.
-            announcement_followup_delay_s: Silence after ding_off before that
+                with the conversation voice after the notice. Empty skips it.
+                ``speak_notice`` does not append it.
+            announcement_followup_delay_s: Silence after the notice before that
                 follow-up. The microphone stays closed during the pause.
             personality_preprompt (tuple[dict[str, str], ...]): Initial personality preprompt messages.
             tool_config (dict[str, Any] | None): Configuration for tools (e.g., audio paths).
@@ -369,9 +329,6 @@ class Glados:
         self._asr_model = asr_model
         self._tts = tts_model
         self._notice_tts = notice_tts_model
-        self._notice_chime_on = notice_chime_on
-        self._notice_chime_off = notice_chime_off
-        self._notice_chime_off_after_interrupt = notice_chime_off_after_interrupt
         self.input_mode = input_mode
         self.completion_url = completion_url
         self.llm_model = llm_model
@@ -426,8 +383,6 @@ class Glados:
         # Initialize events for thread synchronization
         self.processing_active_event = threading.Event()  # Indicates if input processing is active (ASR + LLM + TTS + VLM)
         self.currently_speaking_event = threading.Event()  # Indicates if the assistant is currently speaking
-        # Set while a notice chime is playing so the mic does not treat it as the user.
-        self.notice_chime_hold_event = threading.Event()
         # Set until play_announcement queues startup audio. run() waits for the
         # player to set it again after the last startup line, including a follow-up.
         self.startup_notice_done = threading.Event()
@@ -525,7 +480,6 @@ class Glados:
                 asr_muted_event=self.asr_muted_event,
                 audio_state=self.audio_state,
                 on_interrupt=lambda _: self._push_emotion_event("user", "User interrupted me mid-sentence"),
-                chime_hold_event=self.notice_chime_hold_event,
             )
         if self.input_mode in {"text", "both"}:
             if self.input_mode == "text":
@@ -638,10 +592,6 @@ class Glados:
             tts_muted_event=self.tts_muted_event,
             interaction_state=self.interaction_state,
             observability_bus=self.observability_bus,
-            chime_on=self._notice_chime_on,
-            chime_off=self._notice_chime_off,
-            chime_off_after_interrupt=self._notice_chime_off_after_interrupt,
-            chime_hold_event=self.notice_chime_hold_event,
             startup_notice_done=self.startup_notice_done,
         )
 
@@ -920,7 +870,7 @@ class Glados:
         This method checks if an announcement is set and, if so, places it in the TTS queue as a notice line.
         That startup line uses the Announcer Piper model when ``announcer_model_path`` loaded; otherwise it uses
         the conversation voice. An optional ``announcement_followup`` is queued after it on the conversation
-        voice, with no PA chimes. Later conversation lines and ``speak_notice`` are not part of that sequence.
+        voice. Later conversation lines and ``speak_notice`` are not part of that sequence.
         If the `interruptible` parameter is set to `True`, it allows the announcement to be interrupted by other
         audio playback. If `interruptible` is `None`, it defaults to the instance's `interruptible` setting.
 
@@ -951,8 +901,7 @@ class Glados:
 
         The follow-up belongs only to this startup sequence. ``speak_notice``
         does not append it. The last queued line ends the microphone wait,
-        so a follow-up keeps the input stream closed through ding_off and the
-        GLaDOS line.
+        so a follow-up keeps the input stream closed through the GLaDOS line.
         """
         notice = (self.announcement or "").strip()
         followup = (self.announcement_followup or "").strip()
@@ -960,7 +909,7 @@ class Glados:
         if notice:
             lines.append(SpokenLine(notice, notice=True))
         if followup:
-            # Pause only after a notice. A follow-up with no ding_off starts immediately.
+            # Pause only after a notice. A follow-up with no notice starts immediately.
             delay_s = max(0.0, float(self.announcement_followup_delay_s)) if notice else 0.0
             lines.append(SpokenLine(followup, notice=False, playback_delay_s=delay_s))
         if not lines:
@@ -1015,12 +964,6 @@ class Glados:
         )
 
         tts_model, notice_tts_model = cls._build_tts_models(config)
-        notice_chime_on = load_notice_chime(config.notice_chime_on)
-        notice_chime_off = load_notice_chime(config.notice_chime_off)
-        logger.success(
-            "from_config notice chimes: "
-            f"on={describe_notice_chime(notice_chime_on)} off={describe_notice_chime(notice_chime_off)}"
-        )
 
         audio_io = get_audio_system(
             backend_type=config.audio_io,
@@ -1032,9 +975,6 @@ class Glados:
                 asr_model=asr_model,
                 tts_model=tts_model,
                 notice_tts_model=notice_tts_model,
-                notice_chime_on=notice_chime_on,
-                notice_chime_off=notice_chime_off,
-                notice_chime_off_after_interrupt=config.notice_chime_off_after_interrupt,
                 audio_io=audio_io,
                 completion_url=config.completion_url,
                 llm_model=config.llm_model,
