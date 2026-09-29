@@ -5,14 +5,16 @@ from pathlib import Path
 import sys
 
 import httpx
+from loguru import logger
 from rich import print as rprint
 from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn
 import sounddevice as sd  # type: ignore
 
 from .core.engine import Glados, GladosConfig
 from .TTS import tts_glados
+from .TTS.announcer import AnnouncerVoiceUnavailableError, require_announcer_voice
 from .utils import spoken_text_converter as stc
-from .utils.resources import resource_path
+from .utils.resources import get_package_root, resource_path
 
 # Type aliases for clarity
 type FileHash = str
@@ -172,33 +174,71 @@ def models_valid() -> bool:
     return True
 
 
-def say(text: str, config_path: str | Path | list[str] | list[Path] = "glados_config.yaml") -> None:
+def say(
+    text: str,
+    config_path: str | Path | list[str] | list[Path] = "glados_config.yaml",
+    announcer: bool = False,
+) -> int:
     """
-    Converts text to speech using the GLaDOS text-to-speech system and plays the generated audio.
+    Converts text to speech and plays the generated audio.
 
     Parameters:
-        text (str): The text to be spoken by the GLaDOS voice assistant.
+        text (str): The text to be spoken.
         config_path (str | Path | list, optional): Path to the configuration YAML file(s).
-            Defaults to "glados_config.yaml".
+            Defaults to "glados_config.yaml". Used when ``announcer`` is true so
+            ``announcer_model_path`` and ``GLADOS_ANNOUNCER_MODEL`` apply.
+        announcer: Speak with the local Announcer Piper model instead of GLaDOS.
+            A missing model returns 1 and does not fall back.
 
     Notes:
-        - Uses a text-to-speech synthesizer to generate audio
-        - Converts input text to a spoken format before synthesis
+        - Converts input text with SpokenTextConverter before synthesis
         - Plays the generated audio using the system's default sound device
         - Blocks execution until audio playback is complete
 
     Example:
-        say("Hello, world!")  # Speaks the text using GLaDOS voice
+        say("Hello, world!")  # Speaks the text using the GLaDOS voice
     """
-    glados_tts = tts_glados.SpeechSynthesizer()
+    if announcer:
+        config = GladosConfig.from_yaml(config_path)
+        try:
+            glados_tts = require_announcer_voice(config.announcer_model_path)
+        except AnnouncerVoiceUnavailableError as exc:
+            logger.error(str(exc))
+            return 1
+        logger.success(
+            "glados say voice=Announcer "
+            f"model={config.announcer_model_path!r} length_scale={glados_tts.config.length_scale}"
+        )
+    else:
+        glados_tts = tts_glados.SpeechSynthesizer()
+        logger.success("glados say voice=GLaDOS")
     converter = stc.SpokenTextConverter()
     converted_text = converter.text_to_spoken(text)
     # Generate the audio to from the text
     audio = glados_tts.generate_speech_audio(converted_text)
 
-    # Play the audio
     sd.play(audio, glados_tts.sample_rate)
     sd.wait()
+    return 0
+
+
+def log_cli_start(config: GladosConfig, config_path: str | Path | list[str] | list[Path]) -> None:
+    """Log the ``glados start`` entry. This command does not launch the TUI.
+
+    The module paths show whether ``uv run glados`` imported this checkout
+    or a different install.
+    """
+    engine_file = sys.modules[Glados.__module__].__file__
+    logger.success(
+        "glados start entry: command=start tui=False "
+        f"cli_file={Path(__file__).resolve()} engine_file={engine_file} "
+        f"cwd={Path.cwd()} package_root={get_package_root()} config={config_path!r}"
+    )
+    logger.success(
+        "glados start: "
+        f"asr_muted={config.asr_muted} tts_enabled={config.tts_enabled} "
+        f"announcement={config.announcement!r} announcement_followup={config.announcement_followup!r}"
+    )
 
 
 def start(
@@ -235,6 +275,7 @@ def start(
         updates["asr_muted"] = asr_muted
     if updates:
         glados_config = glados_config.model_copy(update=updates)
+    log_cli_start(glados_config, config_path)
     glados = Glados.from_config(glados_config)
     if glados.announcement:
         glados.play_announcement()
@@ -390,8 +431,20 @@ def main() -> int:
     )
 
     # Say command
-    say_parser = subparsers.add_parser("say", help="Make GLaDOS speak text")
-    say_parser.add_argument("text", type=str, help="Text for GLaDOS to speak")
+    say_parser = subparsers.add_parser(
+        "say",
+        help="Speak text with the GLaDOS voice, or the Announcer voice with --announcer",
+    )
+    say_parser.add_argument("text", type=str, help="Text to speak")
+    say_parser.add_argument(
+        "--announcer",
+        action="store_true",
+        help=(
+            "Speak with the local Announcer Piper model from announcer_model_path "
+            "(or GLADOS_ANNOUNCER_MODEL). Uses that model's announcer.onnx.json settings, "
+            "including length_scale. Fails if the model cannot be loaded."
+        ),
+    )
     parser_add_config(say_parser)
 
     args = parser.parse_args()
@@ -403,7 +456,7 @@ def main() -> int:
             print("Some model files are invalid or missing. Please run 'uv run glados download'")
             return 1
         if args.command == "say":
-            say(args.text, args.config)
+            return say(args.text, args.config, announcer=args.announcer)
         elif args.command == "start":
             start(
                 args.config,

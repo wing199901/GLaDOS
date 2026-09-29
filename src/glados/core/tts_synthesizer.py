@@ -5,10 +5,11 @@ import time
 from loguru import logger
 import numpy as np
 
-from ..TTS import SpeechSynthesizerProtocol
 from ..observability import ObservabilityBus, trim_message
+from ..TTS import SpeechSynthesizerProtocol
 from ..utils import spoken_text_converter as stc
-from .audio_data import AudioMessage
+from .audio_data import SPEAKER_ANNOUNCER, SPEAKER_GLADOS, AudioMessage
+from .spoken_line import SpokenLine, TtsQueueItem
 
 
 class TextToSpeechSynthesizer:
@@ -21,7 +22,7 @@ class TextToSpeechSynthesizer:
 
     def __init__(
         self,
-        tts_input_queue: queue.Queue[str],
+        tts_input_queue: queue.Queue[TtsQueueItem],
         audio_output_queue: queue.Queue[AudioMessage],
         tts_model: SpeechSynthesizerProtocol,
         stc_instance: stc.SpokenTextConverter,
@@ -29,10 +30,12 @@ class TextToSpeechSynthesizer:
         pause_time: float,
         tts_muted_event: threading.Event | None = None,
         observability_bus: ObservabilityBus | None = None,
+        notice_model: SpeechSynthesizerProtocol | None = None,
     ) -> None:
         self.tts_input_queue = tts_input_queue
         self.audio_output_queue = audio_output_queue
         self.tts_model = tts_model
+        self.notice_model = notice_model
         self.stc = stc_instance
         self.shutdown_event = shutdown_event
         self.pause_time = pause_time
@@ -53,7 +56,14 @@ class TextToSpeechSynthesizer:
         logger.info("TextToSpeechSynthesizer thread started.")
         while not self.shutdown_event.is_set():
             try:
-                text_to_speak = self.tts_input_queue.get(timeout=self.pause_time)
+                queued = self.tts_input_queue.get(timeout=self.pause_time)
+                text_to_speak, use_notice, ends_startup, playback_delay_s = self._read_queue_item(queued)
+                logger.success(
+                    "TTS dequeued: "
+                    f"type={type(queued).__name__} notice={use_notice} "
+                    f"ends_startup={ends_startup} playback_delay_s={playback_delay_s} "
+                    f"text={text_to_speak!r}"
+                )
 
                 if text_to_speak == "<EOS>":
                     logger.debug("TTS Synthesizer: Received EOS token.")
@@ -74,13 +84,14 @@ class TextToSpeechSynthesizer:
 
                     start_time = time.time()
                     spoken_text_variant = self.stc.text_to_spoken(text_to_speak)
+                    voice = self._voice_for(use_notice)
                     if self._tts_muted_event and self._tts_muted_event.is_set():
                         audio_data = np.array([], dtype=np.float32)
                     else:
-                        audio_data = self.tts_model.generate_speech_audio(spoken_text_variant)
+                        audio_data = voice.generate_speech_audio(spoken_text_variant)
                     processing_time = time.time() - start_time
 
-                    audio_duration = len(audio_data) / self.tts_model.sample_rate if audio_data.size else 0.0
+                    audio_duration = len(audio_data) / voice.sample_rate if audio_data.size else 0.0
                     logger.info(
                         f"TTS Synthesizer: TTS Complete. Inference: {processing_time:.2f}s, "
                         f"Audio length: {audio_duration:.2f}s for text: '{spoken_text_variant}'"
@@ -98,7 +109,26 @@ class TextToSpeechSynthesizer:
                         )
 
                     # Even if audio_data is empty, send the message so AudioPlayer can log/handle it
-                    self.audio_output_queue.put(AudioMessage(audio=audio_data, text=spoken_text_variant, is_eos=False))
+                    speaker = SPEAKER_ANNOUNCER if voice is self.notice_model else SPEAKER_GLADOS
+                    logger.success(
+                        "TTS produced AudioMessage: "
+                        f"notice={use_notice} speaker={speaker} ends_startup={ends_startup} "
+                        f"playback_delay_s={playback_delay_s} "
+                        f"shape={getattr(audio_data, 'shape', None)} "
+                        f"sr={voice.sample_rate} text={spoken_text_variant!r}"
+                    )
+                    self.audio_output_queue.put(
+                        AudioMessage(
+                            audio=audio_data,
+                            text=spoken_text_variant,
+                            is_eos=False,
+                            sample_rate=voice.sample_rate,
+                            speaker=speaker,
+                            notice=use_notice,
+                            ends_startup=ends_startup,
+                            playback_delay_s=playback_delay_s,
+                        )
+                    )
             except queue.Empty:
                 pass  # Normal, no text to process
             except Exception as e:
@@ -107,3 +137,18 @@ class TextToSpeechSynthesizer:
                 time.sleep(self.pause_time)
 
         logger.info("TextToSpeechSynthesizer thread finished.")
+
+    @staticmethod
+    def _read_queue_item(item: TtsQueueItem) -> tuple[str, bool, bool, float]:
+        """Return text, the notice-voice flag, the startup-end flag, and any lead-in silence."""
+        if isinstance(item, SpokenLine):
+            return item.text, item.notice, item.ends_startup, item.playback_delay_s
+        return item, False, False, 0.0
+
+    def _voice_for(self, use_notice: bool) -> SpeechSynthesizerProtocol:
+        """Select the Announcer model for a notice line, otherwise the conversation voice."""
+        if use_notice and self.notice_model is not None:
+            return self.notice_model
+        if use_notice:
+            logger.warning("Announcer voice is not available; speaking this line with the conversation voice.")
+        return self.tts_model

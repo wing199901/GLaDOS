@@ -12,7 +12,19 @@ Glados:
   llm_headers: null  # Optional extra headers (e.g., OpenRouter HTTP-Referer, X-Title)
   wake_word: null
   voice: "glados"
+  # Startup announcement (and Glados.speak_notice) uses this drop-in when the file exists.
+  # Copy announcer.onnx and announcer.onnx.json into models/TTS/, next to glados.onnx.
+  # Do not commit the ONNX, sidecar, wavs, or checkpoints. A missing file uses `voice`.
+  # Optional override: GLADOS_ANNOUNCER_MODEL (set it empty to disable the Announcer voice).
+  announcer_model_path: "models/TTS/announcer.onnx"
   announcement: "All neural network modules are now loaded. System Operational."
+  # Spoken by the conversation voice (`voice`, GLaDOS) after the notice.
+  # No Announcer voice. Personal/local fun only; edit this string freely.
+  # Empty or null skips the line and opens the microphone after the notice.
+  announcement_followup: "Oh. It's you."
+  # Silence after the notice before the follow-up. The microphone stays closed.
+  # Ignored when announcement_followup is empty.
+  announcement_followup_delay_s: 1.0
   autonomy:
     enabled: false
     tick_interval_s: 10

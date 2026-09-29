@@ -400,8 +400,11 @@ uv run glados                           # Voice mode
 uv run glados tui                       # Text UI
 uv run glados start --input-mode text   # Text only
 uv run glados start --input-mode both   # Voice + text
-uv run glados say "The cake is a lie"   # Just TTS
+uv run glados say "The cake is a lie"   # Just TTS, GLaDOS voice
+uv run glados say --announcer "All neural network modules are now loaded. System Operational."
 ```
+
+`glados say` uses the GLaDOS Piper voice. `glados say --announcer` loads `announcer_model_path` (and `GLADOS_ANNOUNCER_MODEL` when set) the same way startup notices do, including `length_scale` from `announcer.onnx.json`. If the Announcer files are missing, the command exits with an error and does not fall back to GLaDOS. `--config` selects the YAML that supplies the path.
 
 ### TUI Controls
 
@@ -459,6 +462,31 @@ voice: "af_bella"
 **Female UK:** bf_alice, bf_emma, bf_isabella, bf_lily
 **Male US:** am_adam, am_echo, am_eric, am_fenrir, am_liam, am_michael, am_onyx, am_puck
 **Male UK:** bm_daniel, bm_fable, bm_george, bm_lewis
+
+### Startup line: local Announcer voice
+
+The first line spoken at startup is `announcement` in `glados_config.yaml` (default: "All neural network modules are now loaded. System Operational."). `glados start` and the TUI both play it through `Glados.play_announcement` before conversation begins. That line, and later calls to `Glados.speak_notice(text)`, use a second Piper model when it is present. Every other line — LLM replies and the `speak` tool — stays on `voice` (the bundled GLaDOS Piper model when `voice: "glados"`).
+
+`announcement_followup` is an optional second startup line (default: "Oh. It's you."). It is spoken by `voice` after the notice, with no Announcer model. `announcement_followup_delay_s` (default 1.0) is silence after the notice before that line. The microphone stays closed through the pause and the follow-up. An empty or missing follow-up skips both the line and the pause. `speak_notice` does not append this line.
+
+This repo does not include the Announcer weights. Copy your own ONNX into the checkout, in the same folder as `models/TTS/glados.onnx`. On Windows and in WSL that is the `models/TTS/` directory of this clone, not a path outside the repo. Do not commit the ONNX, the sidecar, wavs, or checkpoints. Those names are gitignored.
+
+```text
+models/TTS/announcer.onnx
+models/TTS/announcer.onnx.json
+```
+
+`models/TTS/announcer.json` is also accepted. The default config already points at that relative path, resolved from the repo root the same way as `glados.onnx`:
+
+```yaml
+announcer_model_path: "models/TTS/announcer.onnx"
+```
+
+`GLADOS_ANNOUNCER_MODEL` optionally overrides that path. Set it to empty to force the conversation voice even if the drop-in is present.
+
+If the ONNX, the sidecar, or the model session is missing, startup still speaks. That line uses the conversation voice and the process does not crash. The TUI dialog labels the line **Announcer** only when that model actually synthesized it. Fallback playback stays labeled **GLaDOS**, as do later replies.
+
+`glados start` does not open the TUI. It loads config, then calls `Glados.from_config`, `play_announcement`, and `run`. The microphone opens after the startup notice and, when set, `announcement_followup`. An empty follow-up opens the microphone after the notice.
 
 ### Custom Personality
 

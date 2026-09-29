@@ -11,6 +11,7 @@ import onnxruntime as ort  # type: ignore
 
 from ..utils.resources import resource_path
 from .phonemizer import Phonemizer
+from .piper_config import resolve_piper_config_path
 
 # Default OnnxRuntime is way to verbose, only show fatal errors
 ort.set_default_logger_severity(4)
@@ -122,7 +123,12 @@ class SpeechSynthesizer:
     EOS = "$"  # end of sentence
 
     def __init__(
-        self, model_path: Path = MODEL_PATH, phoneme_path: Path = PHONEME_TO_ID_PATH, speaker_id: int | None = None
+        self,
+        model_path: Path = MODEL_PATH,
+        phoneme_path: Path | None = PHONEME_TO_ID_PATH,
+        speaker_id: int | None = None,
+        *,
+        use_config_phoneme_map: bool = False,
     ) -> None:
         """
         Initialize the text-to-speech synthesizer with a specified model and optional speaker configuration.
@@ -131,6 +137,9 @@ class SpeechSynthesizer:
             model_path (Path): Path to the ONNX model file. Defaults to MODEL_PATH.
             phoneme_path (Path): Path to the phoneme-to-ID mapping file. Defaults to PHONEME_TO_ID_PATH.
             speaker_id (int | None): Optional speaker ID for multi-speaker models. Defaults to None.
+            use_config_phoneme_map: When True, phoneme IDs come from the model's JSON
+                ``phoneme_id_map`` instead of the bundled GLaDOS pickle. Use this for a
+                second local Piper export such as the Announcer voice.
         """
         providers = ort.get_available_providers()
         if "TensorrtExecutionProvider" in providers:
@@ -144,11 +153,10 @@ class SpeechSynthesizer:
             providers=providers,
         )
         self.phonemizer = Phonemizer()
-        self.id_map = self._load_pickle(phoneme_path)
 
         try:
-            # Load the configuration file
-            config_file_path = model_path.with_suffix(".json")
+            # Standard Piper writes model.onnx.json; the bundled GLaDOS voice uses model.json.
+            config_file_path = resolve_piper_config_path(model_path)
             with open(config_file_path, encoding="utf-8") as config_file:
                 config_dict = json.load(config_file)
         except FileNotFoundError:
@@ -161,6 +169,12 @@ class SpeechSynthesizer:
             ) from e
         self.config = PiperConfig.from_dict(config_dict)
         self.sample_rate = self.config.sample_rate
+        if use_config_phoneme_map:
+            self.id_map = {str(symbol): list(ids) for symbol, ids in self.config.phoneme_id_map.items()}
+        else:
+            if phoneme_path is None:
+                raise ValueError("phoneme_path is required when use_config_phoneme_map is False")
+            self.id_map = self._load_pickle(phoneme_path)
         self.speaker_id = (
             self.config.speaker_id_map.get(str(speaker_id), 0)
             if self.config.num_speakers > 1 and self.config.speaker_id_map is not None
