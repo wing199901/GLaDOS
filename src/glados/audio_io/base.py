@@ -29,7 +29,12 @@ class AudioIO(ABC):
         """Stop capturing audio input."""
 
     @abstractmethod
-    def start_speaking(self, audio_data: NDArray[np.float32], sample_rate: int | None = None, text: str = "") -> None:
+    def start_speaking(
+        self,
+        audio_data: NDArray[np.float32],
+        sample_rate: int | None = None,
+        text: str = "",
+    ) -> None:
         """Queue audio for playback (non-blocking)."""
 
     @abstractmethod

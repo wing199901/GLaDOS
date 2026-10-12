@@ -5,9 +5,13 @@ between different components of the voice assistant pipeline.
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
+
+SPEAKER_GLADOS = "GLaDOS"
+SPEAKER_ANNOUNCER = "Announcer"
 
 
 @dataclass
@@ -18,11 +22,38 @@ class AudioMessage:
         audio: Generated audio samples as float32 array
         text: Associated text that was synthesized
         is_eos: Flag indicating end of speech stream
+        sample_rate: Sample rate of this clip. Playback uses this when set,
+            so a notice voice can differ from the conversation voice.
+        speaker: Name shown in the TUI for this line. Notice lines that were
+            actually synthesized with the Announcer model use ``Announcer``.
+            A missing Announcer model keeps ``GLaDOS``.
+        notice: True for startup and ``speak_notice`` lines.
+        ends_startup: True on the last startup line. Playback sets the
+            microphone-open event only after this clip, including a GLaDOS
+            follow-up.
+        playback_delay_s: Silence inserted before this clip. The startup
+            follow-up waits here, after the notice, before GLaDOS speaks.
     """
 
     audio: NDArray[np.float32]
     text: str
     is_eos: bool = False
+    sample_rate: int | None = None
+    speaker: str = SPEAKER_GLADOS
+    notice: bool = False
+    ends_startup: bool = False
+    playback_delay_s: float = 0.0
+
+
+def tts_dialog_role(meta: dict[str, Any] | None) -> str:
+    """Speaker label for a TTS play event.
+
+    Only an explicit Announcer speaker is relabeled. Missing metadata and
+    GLaDOS-voice fallback both stay GLaDOS.
+    """
+    if meta and meta.get("speaker") == SPEAKER_ANNOUNCER:
+        return SPEAKER_ANNOUNCER
+    return SPEAKER_GLADOS
 
 
 @dataclass

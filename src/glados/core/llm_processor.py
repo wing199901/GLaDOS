@@ -13,15 +13,18 @@ import uuid
 from loguru import logger
 from pydantic import HttpUrl  # If HttpUrl is used by config
 import requests
+
 from ..autonomy import ConstitutionalState, TaskSlotStore
-from .context import ContextBuilder
-from .conversation_store import ConversationStore
-from .store import Store
-from .llm_tracking import InFlightCounter
 from ..mcp import MCPManager
 from ..observability import ObservabilityBus, trim_message
 from ..tools import tool_definitions
 from ..vision.vision_state import VisionState
+from .context import ContextBuilder
+from .conversation_store import ConversationStore
+from .llm_tracking import InFlightCounter
+from .spoken_line import TtsQueueItem
+from .store import Store
+
 
 class LanguageModelProcessor:
     """
@@ -48,7 +51,7 @@ class LanguageModelProcessor:
         self,
         llm_input_queue: queue.Queue[dict[str, Any]],
         tool_calls_queue: queue.Queue[dict[str, Any]],
-        tts_input_queue: queue.Queue[str],
+        tts_input_queue: queue.Queue[TtsQueueItem],
         conversation_store: ConversationStore,
         completion_url: HttpUrl,
         model_name: str,  # Renamed from 'model' to avoid conflict

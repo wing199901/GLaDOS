@@ -242,7 +242,6 @@ class WebsocketAudioIO(AudioIO):
             sample_rate = self.SAMPLE_RATE
 
         if self._is_playing:
-            # Stop any existing playback and wait for finish
             self.stop_speaking()
             self._playback_finished_event.wait(timeout=2.0)
 
